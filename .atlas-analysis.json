@@ -1,0 +1,80 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "Keep-rs",
+  "projectDescription": "Rust keeper bots for Drift Protocol on Solana - automated filler and liquidator bots for decentralized trading",
+  "theme": "aspen",
+  "primaryColor": "#9945FF",
+  "lightColor": "#14F195",
+  "darkColor": "#7B3FF2",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "introduction",
+          "installation",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Bot Operations",
+        "pages": [
+          "bots/filler",
+          "bots/liquidator",
+          "bots/configuration",
+          "bots/tx-history"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "architecture/overview",
+          "architecture/event-flow",
+          "architecture/transaction-lifecycle",
+          "architecture/dlob"
+        ]
+      },
+      {
+        "group": "Deployment",
+        "pages": [
+          "deployment/docker",
+          "deployment/monitoring"
+        ]
+      },
+      {
+        "group": "Advanced",
+        "pages": [
+          "advanced/troubleshooting",
+          "advanced/performance"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Perp filler bot for matching orders and uncrossing limit orders",
+    "Liquidator bot with perp-with-fill and spot-with-swap strategies",
+    "Real-time gRPC subscription for account and transaction updates",
+    "Prometheus metrics and monitoring dashboard",
+    "Priority fee optimization and compute unit management",
+    "Docker containerization for easy deployment",
+    "Support for mainnet and devnet environments"
+  ],
+  "publicApiSurface": [
+    "cargo run --release -- --filler (Run perp filler bot)",
+    "cargo run --release -- --liquidator (Run liquidator bot)",
+    "--mainnet / --devnet (Network selection)",
+    "--dry (Dry run mode for simulation)",
+    "--all-markets (Fill for all markets)",
+    "--market-ids (Comma-separated perp market indices)",
+    "--min-collateral (Minimum collateral threshold)",
+    "--use-spot-liquidation (Enable spot liquidation)",
+    "--priority-fee (Set priority fee)",
+    "--swift-cu-limit (Swift transaction compute units)",
+    "--fill-cu-limit (Fill transaction compute units)",
+    "--sub-account-id (Bot subaccount ID)",
+    "cargo run --release --bin=tx_history (Transaction history tool)",
+    "Environment: BOT_PRIVATE_KEY, RPC_URL, GRPC_ENDPOINT, GRPC_X_TOKEN",
+    "Metrics endpoint: http://localhost:9898/metrics",
+    "Dashboard endpoint: http://localhost:9898/dashboard"
+  ]
+}
