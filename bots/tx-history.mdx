@@ -1,0 +1,325 @@
+---
+title: 'Transaction History Tool'
+description: 'Analyze recent transaction performance and statistics'
+---
+
+## Overview
+
+The Transaction History tool (`tx_history`) is a command-line utility that fetches and analyzes recent transactions for a given Solana address. It provides detailed statistics about transaction success rates, fill events, and error patterns.
+
+This tool is particularly useful for:
+- **Bot Performance Analysis**: Understand how well your keeper bot is performing
+- **Competition Analysis**: Identify how often other keepers fill orders first
+- **Error Debugging**: Diagnose common transaction failure patterns
+- **Strategy Optimization**: Use metrics to tune bot configuration
+
+## What It Does
+
+The tool fetches up to 256 recent transactions for a specified address and analyzes them to produce:
+
+1. **Success vs Failed**: Count of confirmed vs failed transactions
+2. **Order DNE Logs**: "Order Does Not Exist" errors (order was already filled or cancelled)
+3. **OrderTrigger Events**: Count of trigger order executions
+4. **No Fill Events**: Successful transactions that didn't result in fills (competition)
+5. **Empty Events**: Transactions with no parseable events
+
+## Installation
+
+The tool is built as part of the Keep-rs project. No separate installation is needed.
+
+```bash
+# Build the transaction history binary
+cargo build --release --bin tx_history
+```
+
+## Usage
+
+### Basic Command
+
+```bash
+cargo run --release --bin tx_history <PUBKEY> --rpc-url <RPC_URL>
+```
+
+### Parameters
+
+<ParamField path="pubkey" type="string" required>
+  The Solana public key (address) to analyze.
+  
+  This is typically your bot's wallet address or sub-account address.
+  
+  Example:
+  ```bash
+  cargo run --release --bin tx_history \
+    DriftKeep8r9vXm3pHF5H8UcBBRSh8d3qCqJTnJVZ7g2 \
+    --rpc-url https://api.mainnet-beta.solana.com
+  ```
+</ParamField>
+
+<ParamField path="--rpc-url" type="string" default="https://api.mainnet-beta.solana.com">
+  Solana RPC endpoint to use for fetching transactions.
+  
+  Examples:
+  ```bash
+  # Default mainnet
+  --rpc-url https://api.mainnet-beta.solana.com
+  
+  # Custom provider
+  --rpc-url https://your-rpc-provider.com/your-api-key
+  
+  # Devnet
+  --rpc-url https://api.devnet.solana.com
+  ```
+</ParamField>
+
+## Examples
+
+### Analyze Mainnet Bot Performance
+
+```bash
+RUST_LOG=info cargo run --release --bin tx_history \
+  DriftKeep8r9vXm3pHF5H8UcBBRSh8d3qCqJTnJVZ7g2 \
+  --rpc-url https://api.mainnet-beta.solana.com
+```
+
+### Analyze with Custom RPC
+
+```bash
+RUST_LOG=info cargo run --release --bin tx_history \
+  YourWalletAddress \
+  --rpc-url https://your-premium-rpc.com/api-key
+```
+
+### Debug Mode (Verbose Logging)
+
+```bash
+RUST_LOG=debug cargo run --release --bin tx_history \
+  YourWalletAddress \
+  --rpc-url https://api.mainnet-beta.solana.com
+```
+
+## Output Format
+
+The tool produces a summary report like this:
+
+```
+fetching txs...
+
+Summary for DriftKeep8r9vXm3pHF5H8UcBBRSh8d3qCqJTnJVZ7g2:
+  Success: 187
+  Failed: 23
+  'Order does not exist' logs: 42
+  'OrderTrigger' events: 15
+  No OrderFill events: 18
+  No events: 5
+```
+
+### Metrics Explained
+
+<ResponseField name="Success" type="number">
+  Number of transactions that confirmed successfully on-chain.
+  
+  **High success rate** (&gt;80%) indicates:
+  - Good RPC connection
+  - Appropriate priority fees
+  - Healthy bot operation
+</ResponseField>
+
+<ResponseField name="Failed" type="number">
+  Number of transactions that failed to confirm or were rejected.
+  
+  **High failure rate** may indicate:
+  - Insufficient priority fees
+  - Network congestion
+  - Invalid transaction construction
+  - Insufficient funds
+</ResponseField>
+
+<ResponseField name="Order does not exist logs" type="number">
+  Number of transactions that encountered "Order does not exist" errors.
+  
+  This happens when:
+  - Another keeper filled the order first (competition)
+  - The order was cancelled before your tx landed
+  - Swift order expired
+  
+  **Moderate levels** (20-40% of success) are normal in competitive environments.
+</ResponseField>
+
+<ResponseField name="OrderTrigger events" type="number">
+  Number of trigger orders successfully executed.
+  
+  Trigger orders are stop-loss or take-profit orders that activate when oracle prices reach specified levels.
+</ResponseField>
+
+<ResponseField name="No OrderFill events" type="number">
+  Successful transactions that didn't produce `OrderFill` events.
+  
+  **Causes**:
+  - Order already filled (by another keeper or AMM)
+  - Partial fills
+  - Transaction included other instructions (trigger, cancel)
+  
+  **High values** indicate heavy competition or inefficient targeting.
+</ResponseField>
+
+<ResponseField name="No events" type="number">
+  Transactions with no parseable Drift events.
+  
+  May indicate:
+  - Non-Drift transactions
+  - Failed instruction execution
+  - Event parsing issues
+</ResponseField>
+
+## Interpreting Results
+
+### Healthy Bot Performance
+
+```
+Success: 180 (85%)
+Failed: 20 (15%)
+'Order does not exist' logs: 45 (25% of success)
+No OrderFill events: 30 (17% of success)
+```
+
+- High success rate (&gt;80%)
+- Moderate competition (20-30% DNE)
+- Low "no fill" rate (&lt;20%)
+
+### High Competition Environment
+
+```
+Success: 150 (75%)
+Failed: 50 (25%)
+'Order does not exist' logs: 90 (60% of success)
+No OrderFill events: 60 (40% of success)
+```
+
+- Moderate success rate
+- High competition (&gt;50% DNE)
+- High "no fill" rate
+
+**Actions**:
+- Increase priority fees
+- Focus on less competitive markets
+- Optimize transaction latency
+
+### Transaction Failures
+
+```
+Success: 100 (50%)
+Failed: 100 (50%)
+'Order does not exist' logs: 20 (20% of success)
+No OrderFill events: 10 (10% of success)
+```
+
+- Low success rate (&lt;60%)
+- Low competition (failures not due to DNE)
+
+**Actions**:
+- Increase priority fees significantly
+- Check RPC endpoint reliability
+- Verify bot wallet has sufficient funds
+- Review transaction construction logs
+
+## Performance Tips
+
+<Tip>
+  **Baseline Analysis**: Run this tool daily to establish performance baselines and detect anomalies.
+</Tip>
+
+<Tip>
+  **Competition Tracking**: Track "Order does not exist" rates over time. Increasing rates indicate more competition entering the market.
+</Tip>
+
+<Tip>
+  **Success Rate Monitoring**: Success rate &lt;70% indicates immediate action needed (fees, RPC, or funding).
+</Tip>
+
+## Limitations
+
+<Warning>
+  **Transaction Limit**: The tool fetches only the most recent 256 transactions. For comprehensive analysis, run it regularly.
+</Warning>
+
+<Warning>
+  **RPC Rate Limits**: Fetching and parsing 256 transactions can hit RPC rate limits on free-tier endpoints. Use a premium RPC provider for best results.
+</Warning>
+
+## Common Issues
+
+### Invalid Pubkey Error
+
+```
+Error: Invalid pubkey: not-a-valid-address
+```
+
+**Solution**: Verify you're using a valid Solana public key (base58 encoded, 32-44 characters).
+
+### RPC Connection Failures
+
+```
+Error: Failed to fetch signatures: connection timeout
+```
+
+**Solution**:
+1. Check your RPC URL is correct
+2. Verify network connectivity
+3. Try a different RPC endpoint
+4. Check for RPC provider outages
+
+### No Transactions Found
+
+```
+Summary for [address]:
+  Success: 0
+  Failed: 0
+  ...
+```
+
+**Causes**:
+- Address has no transaction history
+- Wrong network (mainnet vs devnet)
+- Very old address with history beyond 256 recent txs
+
+## Automation
+
+You can automate performance monitoring with a simple script:
+
+```bash
+#!/bin/bash
+# monitor_bot.sh
+
+BOT_ADDRESS="YourBotAddress"
+RPC_URL="https://your-rpc-provider.com"
+LOG_FILE="bot_stats_$(date +%Y%m%d).log"
+
+echo "[$(date)] Analyzing bot performance..." >> $LOG_FILE
+RUST_LOG=info cargo run --release --bin tx_history \
+  $BOT_ADDRESS \
+  --rpc-url $RPC_URL \
+  2>&1 | tee -a $LOG_FILE
+```
+
+Run this daily via cron:
+
+```cron
+# Run every day at 9 AM
+0 9 * * * /path/to/monitor_bot.sh
+```
+
+## Source Code Reference
+
+The Transaction History tool implementation can be found in `src/tx_history.rs`:
+
+- **Argument parsing** (`src/tx_history.rs:13-21`): CLI argument structure
+- **Signature fetching** (`src/tx_history.rs:35-50`): Fetch recent transaction signatures
+- **Concurrent transaction fetching** (`src/tx_history.rs:52-78`): Parallel transaction data retrieval
+- **Event parsing** (`src/tx_history.rs:80-138`): Parse Drift events and calculate statistics
+- **Summary output** (`src/tx_history.rs:140-146`): Print results
+
+## Related Tools
+
+- **Metrics Dashboard** (`http://localhost:9898/dashboard`): Real-time bot performance monitoring
+- **Prometheus Metrics** (`http://localhost:9898/metrics`): Detailed metrics for alerting and graphing
+- **Solana Explorer**: View individual transactions at https://explorer.solana.com

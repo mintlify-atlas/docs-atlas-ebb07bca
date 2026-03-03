@@ -1,80 +1,441 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start"
+description: "Get your first Keep-rs keeper bot running in minutes"
 ---
 
-## Get started in three steps
+# Quick Start Guide
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will help you get a keeper bot running on Drift Protocol. We'll start with a filler bot in dry-run mode, then move to production.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Make sure you've completed the [Installation](/installation) guide before proceeding.
 </Note>
+
+## Configure Your Bot
+
+<Steps>
+  <Step title="Set Required Environment Variables">
+    Ensure your `.env` file has the four required variables:
+    
+    ```bash
+    # Bot wallet private key (base58 encoded)
+    BOT_PRIVATE_KEY="your_base58_private_key_here"
+    
+    # Solana RPC endpoint
+    RPC_URL="https://your-rpc-provider.com/api-key"
+    
+    # Drift gRPC configuration
+    GRPC_ENDPOINT="https://api.rpcpool.com"
+    GRPC_X_TOKEN="your_grpc_token_here"
+    ```
+    
+    <Warning>
+    The `BOT_PRIVATE_KEY` must be base58 encoded, not a JSON array. See the [Installation guide](/installation#bot-wallet-setup) for how to convert your keypair.
+    </Warning>
+  </Step>
+
+  <Step title="Verify Wallet Funding">
+    Make sure your bot wallet has sufficient SOL for transaction fees:
+    
+    ```bash
+    # Check wallet balance (replace with your bot's public key)
+    solana balance <BOT_PUBLIC_KEY> --url mainnet-beta
+    ```
+    
+    Recommended minimums:
+    - **Filler bot**: 0.5 SOL
+    - **Liquidator bot**: 1-5 SOL (needs capital for taking positions)
+  </Step>
+
+  <Step title="Test Configuration (Dry Run)">
+    Test your configuration without sending real transactions:
+    
+    ```bash
+    RUST_LOG=info cargo run --release -- --mainnet --filler --dry
+    ```
+    
+    Look for these log messages indicating success:
+    ```
+    INFO bot started: authority=<YOUR_PUBKEY>, subaccount=0
+    INFO mainnet=true, markets=false
+    INFO gRPC subscriptions established
+    INFO metrics server listening on 0.0.0.0:9898
+    ```
+    
+    Press `Ctrl+C` to stop the dry run.
+  </Step>
+</Steps>
+
+## Run the Filler Bot
+
+The filler bot matches orders and provides liquidity to earn fees.
+
+<Tabs>
+  <Tab title="Production Mode">
+    Run the filler bot on mainnet with detailed logging:
+    
+    ```bash
+    RUST_LOG=filler=info,dlob=info,swift=info \
+        cargo run --release -- --mainnet --filler
+    ```
+    
+    ### What This Command Does
+    
+    - `RUST_LOG=filler=info,dlob=info,swift=info` - Enables info-level logs for filler, DLOB, and swift order modules
+    - `cargo run --release` - Runs the optimized release build
+    - `--mainnet` - Uses mainnet-beta Solana network
+    - `--filler` - Runs the perp filler bot
+    
+    <Note>
+    The bot will start filling orders immediately. Monitor the logs to see fills and transaction results.
+    </Note>
+  </Tab>
+  
+  <Tab title="Dry Run Mode">
+    Test your strategy without sending real transactions:
+    
+    ```bash
+    RUST_LOG=filler=info,dlob=info,swift=info \
+        cargo run --release -- --mainnet --filler --dry
+    ```
+    
+    The `--dry` flag simulates all transactions without actually sending them to the network. This is useful for:
+    - Testing your configuration
+    - Analyzing market conditions
+    - Estimating potential profitability
+    - Debugging without spending SOL
+  </Tab>
+  
+  <Tab title="Custom Markets">
+    Fill orders for specific markets only:
+    
+    ```bash
+    # Fill only SOL-PERP (market 0) and BTC-PERP (market 1)
+    RUST_LOG=filler=info,dlob=info \
+        cargo run --release -- --mainnet --filler --market-ids="0,1"
+    ```
+    
+    Or fill for all available markets:
+    
+    ```bash
+    RUST_LOG=filler=info,dlob=info \
+        cargo run --release -- --mainnet --filler --all-markets
+    ```
+    
+    <Note>
+    Market IDs can also be set in your `.env` file with `MARKET_IDS="0,1,2"`
+    </Note>
+  </Tab>
+  
+  <Tab title="Docker">
+    Run the filler bot in a Docker container:
+    
+    ```bash
+    docker run --env-file .env -p 9898:9898 keeprs --mainnet --filler
+    ```
+    
+    For detached mode with restart policy:
+    ```bash
+    docker run -d \
+      --name keeprs-filler \
+      --restart unless-stopped \
+      --env-file .env \
+      -p 9898:9898 \
+      keeprs --mainnet --filler
+    ```
+    
+    View logs:
+    ```bash
+    docker logs -f keeprs-filler
+    ```
+  </Tab>
+</Tabs>
+
+### Filler Bot Configuration Options
+
+Customize the filler bot behavior with command-line flags:
+
+```bash
+RUST_LOG=filler=info cargo run --release -- \
+    --mainnet \
+    --filler \
+    --market-ids="0,1,2" \
+    --priority-fee=512 \
+    --swift-cu-limit=364000 \
+    --fill-cu-limit=256000
+```
+
+| Flag | Description | Default |
+|------|-------------|----------|
+| `--market-ids` | Comma-separated market indices to fill | `"0,1,2"` |
+| `--all-markets` | Fill for all available markets | `false` |
+| `--priority-fee` | Base priority fee in microlamports | `512` |
+| `--swift-cu-limit` | Compute units for swift fills | `364000` |
+| `--fill-cu-limit` | Compute units for regular fills | `256000` |
+| `--dry` | Simulate without sending transactions | `false` |
+
+## Run the Liquidator Bot
+
+The liquidator bot protects the protocol by liquidating undercollateralized positions.
+
+<Tabs>
+  <Tab title="Perp + Spot Liquidations">
+    Run the full liquidator with both perp and spot liquidations:
+    
+    ```bash
+    RUST_LOG=liquidator=info,dlob=info \
+        cargo run --release -- --mainnet --liquidator
+    ```
+    
+    This is the recommended configuration. The bot will:
+    - Monitor all user accounts for margin violations
+    - Liquidate perp positions using the DLOB for fills
+    - Liquidate spot borrows using Jupiter swaps
+    - Track high-risk users for faster response
+  </Tab>
+  
+  <Tab title="Perp Only">
+    Run liquidator for perpetual positions only:
+    
+    ```bash
+    RUST_LOG=liquidator=info,dlob=info \
+        cargo run --release -- --mainnet --liquidator --no-use-spot-liquidation
+    ```
+    
+    Use this if you only want to liquidate perp positions and avoid spot markets.
+  </Tab>
+  
+  <Tab title="Custom Threshold">
+    Set a minimum collateral threshold for liquidations:
+    
+    ```bash
+    RUST_LOG=liquidator=info \
+        cargo run --release -- \
+        --mainnet \
+        --liquidator \
+        --min-collateral=5000000
+    ```
+    
+    The `--min-collateral` flag (in micro-units) helps you avoid liquidating dust positions that may not be profitable.
+  </Tab>
+  
+  <Tab title="Docker">
+    Run the liquidator bot in Docker:
+    
+    ```bash
+    docker run -d \
+      --name keeprs-liquidator \
+      --restart unless-stopped \
+      --env-file .env \
+      -p 9898:9898 \
+      keeprs --mainnet --liquidator
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Liquidator bots need sufficient capital to take on positions during liquidation. Ensure your wallet has adequate funds beyond just transaction fees.
+</Warning>
+
+### Liquidator Bot Configuration
+
+```bash
+RUST_LOG=liquidator=info cargo run --release -- \
+    --mainnet \
+    --liquidator \
+    --min-collateral=1000000 \
+    --use-spot-liquidation \
+    --priority-fee=512
+```
+
+| Flag | Description | Default |
+|------|-------------|----------|
+| `--liquidator` | Run in liquidator mode | `false` |
+| `--min-collateral` | Minimum collateral to liquidate (micro-units) | `1000000` |
+| `--use-spot-liquidation` | Enable spot liquidations | `true` |
+| `--priority-fee` | Base priority fee in microlamports | `512` |
+| `--dry` | Simulate without sending transactions | `false` |
+
+## Verify Your Bot is Working
+
+<Steps>
+  <Step title="Check Logs">
+    Look for successful operations in the logs:
+    
+    **Filler Bot:**
+    ```
+    INFO filler: attempting fill for order <ORDER_ID>
+    INFO filler: tx sent: <SIGNATURE>
+    INFO filler: fill confirmed, earned X SOL
+    ```
+    
+    **Liquidator Bot:**
+    ```
+    INFO liquidator: found liquidatable user: <USER>
+    INFO liquidator: attempting liquidation
+    INFO liquidator: liquidation confirmed: <SIGNATURE>
+    ```
+  </Step>
+
+  <Step title="Check Metrics Endpoint">
+    Access the Prometheus metrics at `http://localhost:9898/metrics`:
+    
+    ```bash
+    curl http://localhost:9898/metrics
+    ```
+    
+    Key metrics to watch:
+    - `tx_sent_total` - Total transactions sent
+    - `tx_confirmed_total` - Total transactions confirmed
+    - `tx_failed_total` - Total failed transactions
+    - `fills_total` - Total fills executed (filler only)
+    - `liquidations_total` - Total liquidations (liquidator only)
+  </Step>
+
+  <Step title="Check Health Endpoint">
+    Verify the bot is healthy:
+    
+    ```bash
+    curl http://localhost:9898/health
+    ```
+    
+    A `200 OK` response indicates the bot is running correctly.
+  </Step>
+
+  <Step title="View Dashboard (Optional)">
+    Open the web dashboard in your browser:
+    
+    ```
+    http://localhost:9898/dashboard
+    ```
+    
+    The dashboard shows real-time bot status, recent transactions, and performance metrics.
+  </Step>
+</Steps>
+
+## Monitor Performance
+
+### Using Prometheus & Grafana
+
+The metrics endpoint exposes data in Prometheus format. You can scrape it with Prometheus and visualize in Grafana:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'keeprs'
+    static_configs:
+      - targets: ['localhost:9898']
+```
+
+### Using curl
+
+Quick checks from the command line:
+
+```bash
+# Total transactions sent
+curl -s http://localhost:9898/metrics | grep tx_sent_total
+
+# Success rate
+curl -s http://localhost:9898/metrics | grep tx_confirmed_total
+
+# Current slot
+curl -s http://localhost:9898/metrics | grep current_slot
+```
+
+### Log Levels
+
+Adjust logging verbosity with `RUST_LOG`:
+
+```bash
+# Minimal logging
+RUST_LOG=error cargo run --release -- --mainnet --filler
+
+# Standard logging
+RUST_LOG=info cargo run --release -- --mainnet --filler
+
+# Detailed logging
+RUST_LOG=debug cargo run --release -- --mainnet --filler
+
+# Module-specific logging
+RUST_LOG=filler=debug,dlob=info,swift=debug cargo run --release -- --mainnet --filler
+```
+
+## Transaction History Tool
+
+Keep-rs includes a utility to analyze your bot's transaction history:
+
+```bash
+RUST_LOG=info cargo run --release --bin=tx_history <BOT_PUBKEY> --rpc-url <RPC_URL>
+```
+
+This prints statistics about recent transactions including:
+- Success rate
+- Average priority fees paid
+- Compute units used
+- Total fees spent
+
+## Troubleshooting
+
+### Bot Not Sending Transactions
+
+<AccordionGroup>
+  <Accordion title="Check wallet balance">
+    ```bash
+    solana balance <YOUR_BOT_PUBKEY> --url mainnet-beta
+    ```
+    Ensure you have at least 0.1 SOL for transaction fees.
+  </Accordion>
+  
+  <Accordion title="Verify RPC connection">
+    Check that your RPC endpoint is responding:
+    ```bash
+    curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' <YOUR_RPC_URL>
+    ```
+  </Accordion>
+  
+  <Accordion title="Check gRPC credentials">
+    Ensure `GRPC_ENDPOINT` and `GRPC_X_TOKEN` are correct. Look for connection errors in logs:
+    ```
+    ERROR failed to connect to gRPC
+    ```
+  </Accordion>
+  
+  <Accordion title="Verify bot is finding opportunities">
+    Increase log level to see if crosses are being detected:
+    ```bash
+    RUST_LOG=filler=debug cargo run --release -- --mainnet --filler
+    ```
+    Look for "found cross" or "attempting fill" messages.
+  </Accordion>
+</AccordionGroup>
+
+### High Transaction Failure Rate
+
+- **Increase priority fees**: Use `--priority-fee=1000` or higher
+- **Adjust compute units**: Increase `--fill-cu-limit` if hitting CU limits
+- **Check competition**: Other bots may be faster - optimize your RPC latency
+- **Review logs**: Look for specific error messages in transaction confirmations
+
+### No Liquidations Found
+
+- This is normal during low volatility periods
+- The liquidator runs continuously waiting for opportunities
+- Check `http://localhost:9898/metrics` - `users_monitored` should be > 0
+- Use `RUST_LOG=liquidator=debug` to see margin checks
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration Guide" icon="gear" href="/bots/configuration">
+    Learn about all configuration options and optimization strategies
+  </Card>
+  <Card title="Monitoring & Metrics" icon="chart-line" href="/deployment/monitoring">
+    Set up comprehensive monitoring with Prometheus and Grafana
+  </Card>
+  <Card title="Performance Optimization" icon="gauge" href="/advanced/performance">
+    Optimize your bot for maximum performance
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/advanced/troubleshooting">
+    Common issues and how to resolve them
+  </Card>
+</CardGroup>

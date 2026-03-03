@@ -1,0 +1,311 @@
+---
+title: 'Docker Deployment'
+description: 'Deploy Keep-rs using Docker containers'
+---
+
+## Overview
+
+Keep-rs provides a multi-stage Docker build that creates an optimized production image. The build process handles all dependencies including the Drift FFI library.
+
+## Docker Build Process
+
+The Dockerfile uses a two-stage build:
+
+### Build Stage
+
+The builder stage compiles the Rust application:
+
+<CodeGroup>
+```dockerfile Dockerfile (Build Stage)
+FROM rust:1.87.0 AS builder
+WORKDIR /app
+
+ENV CARGO_DRIFT_FFI_PATH="/usr/local/lib"
+
+# Install dependencies
+RUN apt-get update && apt-get install jq -y && rustup component add rustfmt
+
+# Install libdrift from latest release
+RUN SO_URL=$(curl -s https://api.github.com/repos/drift-labs/drift-ffi-sys/releases/latest | jq -r '.assets[] | select(.name=="libdrift_ffi_sys.so") | .browser_download_url') &&\
+  curl -L -o libdrift_ffi_sys.so "$SO_URL" &&\
+  cp libdrift_ffi_sys.so $CARGO_DRIFT_FFI_PATH
+
+# Build the application
+COPY . .
+RUN cargo build --release
+```
+</CodeGroup>
+
+### Runtime Stage
+
+The runtime image uses Debian Slim for a smaller footprint:
+
+<CodeGroup>
+```dockerfile Dockerfile (Runtime Stage)
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates
+COPY --from=builder /usr/local/lib/libdrift_ffi_sys.so /lib/
+COPY --from=builder /app/target/release/keeprs /usr/local/bin/keeprs
+
+EXPOSE 9898
+ENV METRICS_PORT=9898
+
+ENTRYPOINTRYPOINT ["./keeprs"]
+```
+</CodeGroup>
+
+## Building the Image
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/drift-labs/keeper-bots-v2
+    cd keeper-bots-v2
+    ```
+  </Step>
+
+  <Step title="Build the Docker image">
+    ```bash
+    docker build -t keeprs:latest .
+    ```
+    
+    This will:
+    - Download and compile all Rust dependencies
+    - Fetch the latest Drift FFI library from GitHub
+    - Build the optimized release binary
+  </Step>
+
+  <Step title="Verify the build">
+    ```bash
+    docker images keeprs
+    ```
+  </Step>
+</Steps>
+
+## Environment Configuration
+
+Create a `.env` file with your configuration:
+
+<CodeGroup>
+```bash .env
+# Required: Bot wallet private key (base58 encoded)
+BOT_PRIVATE_KEY="your_base58_private_key_here"
+
+# Required: RPC endpoint for Solana
+RPC_URL="https://api.mainnet-beta.solana.com"
+
+# Required: gRPC configuration for Drift updates
+GRPC_ENDPOINT="https://api.rpcpool.com"
+GRPC_X_TOKEN="your_grpc_token_here"
+
+# Required: Pyth price feed access token
+PYTH_LAZER_TOKEN="your_pyth_token_here"
+
+# Optional: Metrics server port (default: 9898)
+METRICS_PORT=9898
+
+# Optional: Market IDs to operate on (comma-separated)
+MARKET_IDS="0,1,2"
+
+# Optional: Network selection (default: true)
+MAINNET=true
+
+# Optional: Dry run mode (do not send transactions)
+DRY_RUN=false
+```
+</CodeGroup>
+
+<Note>
+  The `BOT_PRIVATE_KEY`, `RPC_URL`, `GRPC_ENDPOINT`, `GRPC_X_TOKEN`, and `PYTH_LAZER_TOKEN` are required for the bot to function.
+</Note>
+
+## Running with Docker
+
+<Tabs>
+  <Tab title="Filler Bot">
+    Run the filler bot (default mode):
+    
+    ```bash
+    docker run -d \
+      --name keeprs-filler \
+      --env-file .env \
+      -p 9898:9898 \
+      keeprs:latest \
+      --filler
+    ```
+  </Tab>
+
+  <Tab title="Liquidator Bot">
+    Run the liquidator bot:
+    
+    ```bash
+    docker run -d \
+      --name keeprs-liquidator \
+      --env-file .env \
+      -p 9898:9898 \
+      keeprs:latest \
+      --liquidator
+    ```
+  </Tab>
+
+  <Tab title="Custom Configuration">
+    Run with custom market IDs and priority fees:
+    
+    ```bash
+    docker run -d \
+      --name keeprs \
+      --env-file .env \
+      -p 9898:9898 \
+      keeprs:latest \
+      --filler \
+      --market-ids "0,1,2,3" \
+      --priority-fee 1000
+    ```
+  </Tab>
+</Tabs>
+
+## Docker Compose
+
+For easier management, use Docker Compose:
+
+<CodeGroup>
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  filler:
+    build: .
+    container_name: keeprs-filler
+    env_file: .env
+    ports:
+      - "9898:9898"
+    command: ["--filler", "--market-ids", "0,1,2"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  liquidator:
+    build: .
+    container_name: keeprs-liquidator
+    env_file: .env
+    ports:
+      - "9899:9898"
+    command: ["--liquidator"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+</CodeGroup>
+
+Start both bots:
+
+```bash
+docker-compose up -d
+```
+
+View logs:
+
+```bash
+# All services
+docker-compose logs -f
+
+# Specific service
+docker-compose logs -f filler
+```
+
+Stop the bots:
+
+```bash
+docker-compose down
+```
+
+## Port Configuration
+
+The metrics server listens on port 9898 by default:
+
+- **9898**: Prometheus metrics endpoint and dashboard
+
+<Note>
+  You can customize the metrics port by setting the `METRICS_PORT` environment variable in your `.env` file.
+</Note>
+
+## Container Management
+
+<CodeGroup>
+```bash View Logs
+# View real-time logs
+docker logs -f keeprs-filler
+
+# View last 100 lines
+docker logs --tail 100 keeprs-filler
+```
+
+```bash Stop/Start
+# Stop the container
+docker stop keeprs-filler
+
+# Start the container
+docker start keeprs-filler
+
+# Restart the container
+docker restart keeprs-filler
+```
+
+```bash Remove Container
+# Stop and remove
+docker stop keeprs-filler && docker rm keeprs-filler
+```
+</CodeGroup>
+
+## Health Checks
+
+Verify the bot is running:
+
+```bash
+curl http://localhost:9898/health
+```
+
+A successful response returns HTTP 200 OK.
+
+## Troubleshooting
+
+### Container Fails to Start
+
+Check the logs for errors:
+
+```bash
+docker logs keeprs-filler
+```
+
+Common issues:
+- Missing or invalid `BOT_PRIVATE_KEY`
+- Incorrect RPC or gRPC endpoints
+- Network connectivity issues
+
+### Metrics Not Available
+
+Ensure the port is properly exposed:
+
+```bash
+docker port keeprs-filler
+```
+
+Verify the metrics endpoint:
+
+```bash
+curl http://localhost:9898/metrics
+```
+
+### High Memory Usage
+
+The bot uses mimalloc for optimized memory allocation. Monitor resource usage:
+
+```bash
+docker stats keeprs-filler
+```

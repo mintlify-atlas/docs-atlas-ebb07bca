@@ -1,0 +1,143 @@
+---
+title: "Introduction to Keep-rs"
+description: "High-performance Rust keeper bots for Drift Protocol - automated trading bots for filling orders and liquidating positions on Solana"
+---
+
+# Keep-rs: Rust Keeper Bots for Drift Protocol
+
+Keep-rs is a suite of high-performance keeper bots written in Rust for the Drift Protocol, a decentralized exchange on Solana. These bots provide essential infrastructure for the protocol by filling orders and liquidating undercollateralized positions.
+
+## What are Keeper Bots?
+
+Keeper bots are automated programs that perform critical functions in decentralized finance protocols:
+
+- **Filler Bots** match orders and provide liquidity by filling swap orders against resting limit orders
+- **Liquidator Bots** protect the protocol by closing undercollateralized positions before they become insolvent
+
+These bots earn fees for their services while keeping the protocol healthy and efficient.
+
+<CardGroup cols={2}>
+  <Card title="Filler Bot" icon="arrows-rotate" href="#filler-bot-overview">
+    Match swift orders and auction orders against resting liquidity
+  </Card>
+  <Card title="Liquidator Bot" icon="triangle-exclamation" href="#liquidator-bot-overview">
+    Liquidate undercollateralized perp and spot positions
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="#docker-deployment">
+    Deploy bots using Docker containers
+  </Card>
+  <Card title="Configuration" icon="gear" href="/installation">
+    Configure environment variables and bot parameters
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### High Performance Architecture
+- **Multi-threaded Design**: Separate threads for event processing, transaction building, and confirmation
+- **Real-time Updates**: gRPC subscriptions for instant account, oracle, and transaction updates
+- **Efficient Memory Usage**: Custom allocator (mimalloc) and optimized data structures
+- **Batch Processing**: Processes up to 32 gRPC events per batch for maximum throughput
+
+### Advanced Trading Capabilities
+- **DLOB Integration**: Full decentralized limit order book for finding crosses and maker orders
+- **Swift Order Support**: WebSocket streaming for off-chain order matching
+- **Dynamic Priority Fees**: Automatic fee calculation based on network conditions (60th percentile)
+- **Atomic Operations**: Liquidations with integrated swaps and fills
+
+### Production-Ready Monitoring
+- **Prometheus Metrics**: Comprehensive metrics exposed on `/metrics` endpoint
+- **Health Checks**: Built-in health endpoint for monitoring
+- **Dashboard**: Web dashboard for real-time bot status at `/dashboard`
+- **Structured Logging**: Detailed logging with configurable log levels
+
+### Risk Management
+- **Dry Run Mode**: Test strategies without sending real transactions
+- **Rate Limiting**: Prevents excessive transaction attempts (5 slot minimum between liquidations)
+- **Compute Unit Limits**: Configurable CU limits to prevent failed transactions
+- **Competition Handling**: Graceful handling of failed fills and partial fills
+
+## Filler Bot Overview
+
+The perp filler bot matches swift orders and on-chain auction orders against resting liquidity on the DLOB. It continuously:
+
+1. Monitors the order book for crossing opportunities
+2. Receives swift orders via WebSocket
+3. Attempts to uncross resting limit orders
+4. Fills auction orders when profitable
+5. Tracks transaction success and competition metrics
+
+<Note>
+Fillers earn fees by providing liquidity and reducing spreads on the protocol. They compete with AMMs and other fillers to capture opportunities.
+</Note>
+
+### Event Flow
+
+The filler processes multiple event sources simultaneously:
+
+- **gRPC Slot Updates**: Triggers orderbook refresh and cross detection
+- **gRPC Account Updates**: Updates user positions and orders in the DLOB
+- **gRPC Transaction Updates**: Confirms sent transactions and updates metrics
+- **Swift Order WebSocket**: Receives off-chain orders for immediate matching
+
+## Liquidator Bot Overview
+
+The liquidator bot protects the protocol by closing undercollateralized positions. It implements a sophisticated "liquidate with fill" strategy:
+
+### Perp Liquidations
+1. Monitors all user accounts for margin violations (`total_collateral < margin_requirement`)
+2. Tracks high-risk users (free margin < 20% of requirement)
+3. Finds the largest perp position to liquidate
+4. Queries DLOB for best maker orders to match against
+5. Executes `liquidate_perp_with_fill` transaction
+
+### Spot Liquidations
+1. Identifies borrow positions that need liquidation
+2. Uses the largest deposit as collateral
+3. Queries Jupiter aggregator for optimal swap routes
+4. Executes `liquidate_spot_with_swap` transaction with atomic swap
+
+<Warning>
+Liquidator bots require sufficient capital to execute liquidations. Ensure your bot wallet has adequate SOL for transaction fees and collateral for taking positions.
+</Warning>
+
+### Margin Status Tracking
+
+The liquidator categorizes users into three states:
+
+- **Liquidatable**: `total_collateral < margin_requirement` - immediate liquidation attempted
+- **High Risk**: `free_margin < 20% of margin_requirement` - monitored on every oracle update
+- **Safe**: All other users - checked periodically
+
+## Docker Deployment
+
+Keep-rs includes a production-ready Dockerfile with a multi-stage build:
+
+```dockerfile
+# Build stage with Rust toolchain and drift-ffi-sys
+FROM rust:1.87.0 AS builder
+
+# Runtime stage with minimal Debian image
+FROM debian:bookworm-slim
+```
+
+The Docker image:
+- Downloads the latest `libdrift_ffi_sys.so` from GitHub releases
+- Builds the release binary with optimizations
+- Creates a minimal runtime image with only required dependencies
+- Exposes port 9898 for metrics and health checks
+
+<Note>
+The metrics endpoint is exposed on port 9898 by default. You can customize this with the `METRICS_PORT` environment variable.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up your development environment and build Keep-rs
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get your first bot running in minutes
+  </Card>
+</CardGroup>

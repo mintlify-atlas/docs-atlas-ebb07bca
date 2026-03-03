@@ -1,0 +1,527 @@
+---
+title: "DLOB (Decentralized Limit Order Book)"
+description: "Deep dive into the DLOB orderbook implementation"
+---
+
+## What is DLOB?
+
+DLOB (Decentralized Limit Order Book) is an in-memory representation of all resting limit orders on the Drift Protocol. It enables fast order matching and cross detection for keeper bots.
+
+<Info>Unlike traditional orderbooks that live on a centralized server, DLOB is maintained locally by each keeper bot based on on-chain state synchronized via gRPC.</Info>
+
+**Key Characteristics:**
+
+- **In-Memory**: Stored in RAM for microsecond-level query performance
+- **Eventually Consistent**: Updated via gRPC events as on-chain state changes
+- **Market-Agnostic**: Tracks all perpetual and spot markets simultaneously
+- **Cross Detection**: Primary purpose is finding profitable order matches
+
+## Purpose and Benefits
+
+### Why DLOB is Essential
+
+**Without DLOB:**
+- Would need to scan all on-chain user accounts every slot
+- Query time: ~100ms+ per market for RPC calls
+- Would miss most opportunities due to latency
+- Expensive in terms of RPC usage and costs
+
+**With DLOB:**
+- Query time: ~10-100μs for cross detection
+- No RPC calls during main loop
+- Enables sub-slot reaction time
+- Scales to hundreds of markets and thousands of orders
+
+### Use Cases
+
+**Filler Bot:**
+1. **Auction Crosses**: Find resting orders that cross with auction orders
+2. **Swift Fills**: Match Swift orders against resting liquidity
+3. **Limit Uncrossing**: Find resting limit orders that cross each other
+4. **AMM Opportunities**: Identify when vAMM wants to provide liquidity
+
+**Liquidator Bot:**
+1. **Maker Queries**: Find best resting orders to fill liquidated positions
+2. **Top Maker Selection**: Get optimal liquidity for `liquidate_perp_with_fill`
+3. **Market Depth**: Assess available liquidity before attempting liquidation
+
+## Core Data Structures
+
+### Order Representation
+
+Orders in DLOB are stored as `L3Order` (Level 3 - full order details):
+
+```rust
+pub struct L3Order {
+    pub order_id: u32,
+    pub user: Pubkey,
+    pub price: u64,
+    pub base_asset_amount: u64,
+    pub base_asset_amount_filled: u64,
+    pub direction: PositionDirection,  // Long or Short
+    pub market_index: u16,
+    pub market_type: MarketType,  // Perp or Spot
+    pub slot: u64,
+    pub order_type: OrderType,
+    // ... additional fields
+}
+```
+
+### Orderbook Organization
+
+The DLOB organizes orders hierarchically:
+
+```
+DLOB
+├── Market 0 (Perp SOL-PERP)
+│   ├── Bids (Longs)
+│   │   ├── Price Level 27500000000
+│   │   │   ├── Order 1 (user A, 10 SOL)
+│   │   │   └── Order 2 (user B, 5 SOL)
+│   │   └── Price Level 27400000000
+│   │       └── Order 3 (user C, 20 SOL)
+│   └── Asks (Shorts)
+│       ├── Price Level 27600000000
+│       └── Price Level 27700000000
+├── Market 1 (Perp BTC-PERP)
+│   ├── Bids
+│   └── Asks
+└── ...
+```
+
+**Key Features:**
+- Orders grouped by market, side, and price level
+- Price levels sorted for efficient matching
+- Orders within price level maintain insertion order (FIFO)
+- Fast lookups by user or order ID
+
+## Updating DLOB State
+
+### DLOBNotifier
+
+The `DLOBNotifier` processes gRPC events and updates DLOB:
+
+```rust
+let dlob_notifier = DLOBNotifier::new();
+
+// In gRPC subscription setup:
+on_account_update_fn: Box::new(move |update: AccountUpdate| {
+    dlob_notifier.process_account_update(update);
+}),
+
+on_slot_update_fn: Box::new(move |slot: u64| {
+    dlob_notifier.process_slot_update(slot);
+}),
+```
+
+### Event Types
+
+**Account Updates:**
+- User account changes (orders placed, filled, cancelled)
+- Market account changes (AMM state updates)
+
+**Slot Updates:**
+- Triggers auction price recalculation
+- Updates time-based order states (expiration)
+
+### Update Flow
+
+1. **Receive gRPC Account Update**
+2. **Parse Account Data**: Deserialize user account
+3. **Compare to Previous State**: Detect what changed
+4. **Emit DLOBEvent**: Notify DLOB of specific change
+5. **DLOB Processes Event**: Update internal data structures
+
+```rust
+// Simplified example
+match event {
+    DLOBEvent::OrderPlaced { order, user } => {
+        dlob.insert_order(order, user);
+    }
+    DLOBEvent::OrderCancelled { order_id, user } => {
+        dlob.remove_order(order_id, user);
+    }
+    DLOBEvent::OrderFilled { order_id, filled_amount, user } => {
+        dlob.update_order_filled(order_id, filled_amount, user);
+    }
+    DLOBEvent::SlotOrPriceUpdate { slot } => {
+        dlob.update_auction_states(slot);
+    }
+}
+```
+
+<Note>Updates are processed asynchronously, so DLOB state may briefly lag on-chain state by a few milliseconds.</Note>
+
+## Cross Detection
+
+### Finding Auction Crosses
+
+Auction orders have dynamic prices that improve over time:
+
+```rust
+let crosses_and_top_makers = dlob.find_crosses_for_auctions(
+    market_index,
+    MarketType::Perp,
+    slot,
+    oracle_price,
+    Some(&perp_market),
+    None,
+);
+```
+
+**Algorithm:**
+
+1. **Get All Auction Orders**: Filter orders by market and type
+2. **Calculate Auction Prices**: Use current slot to compute price for each auction
+3. **For Each Auction Order**:
+   - Determine crossing region (e.g., auction buy at $27.50 crosses resting sells at $27.40)
+   - Query DLOB for resting orders in that region
+   - Return makers that cross, ordered by best price
+4. **Check AMM Opportunities**: Determine if vAMM wants to participate
+5. **Return Results**: List of (taker_order, maker_crosses) pairs
+
+**CrossesAndTopMakers Structure:**
+
+```rust
+pub struct CrossesAndTopMakers {
+    pub crosses: Vec<(L3Order, MakerCrosses)>,
+    pub slot: u64,
+}
+
+pub struct MakerCrosses {
+    pub orders: Vec<(L3Order, u64)>,  // (maker_order, fill_amount)
+    pub has_vamm_cross: bool,
+    pub taker_direction: PositionDirection,
+    pub slot: u64,
+}
+```
+
+From filler.rs:282:
+
+```rust
+let mut crosses_and_top_makers = dlob.find_crosses_for_auctions(
+    market_index, MarketType::Perp, slot, oracle_price, 
+    Some(&perp_market), None
+);
+
+// Filter out orders we've recently attempted
+crosses_and_top_makers.crosses.retain(|(o, _)| 
+    limiter.allow_event(slot, o.order_id)
+);
+
+if !crosses_and_top_makers.crosses.is_empty() {
+    try_auction_fill(drift, priority_fee, cu_limit, 
+        market_index, filler_subaccount, 
+        crosses_and_top_makers, tx_worker_ref.clone(), 
+        pyth_update, trigger_price, 
+        jit_filter
+    ).await;
+}
+```
+
+### Finding Swift Order Crosses
+
+Swift orders are matched against all resting liquidity:
+
+```rust
+let taker_order = TakerOrder::from_order_params(order_params, price);
+let crosses = dlob.find_crosses_for_taker_order(
+    slot + 1,
+    oracle_price as u64,
+    taker_order,
+    Some(&perp_market),
+    None,
+);
+```
+
+**Algorithm:**
+
+1. **Create TakerOrder**: Convert Swift order params to DLOB taker format
+2. **Determine Direction**: Long taker crosses resting asks, short crosses bids
+3. **Query Price Levels**: Get all resting orders that price-match
+4. **Calculate Fill Amounts**: Determine how much can be filled at each level
+5. **Return Makers**: List of crossing makers with fill amounts
+
+From filler.rs:237:
+
+```rust
+let crosses = dlob.find_crosses_for_taker_order(
+    slot + 1, oracle_price as u64, taker_order, 
+    Some(&perp_market), None
+);
+
+if !crosses.is_empty() {
+    log::info!(target: TARGET, "found resting cross. crosses={crosses:?}");
+    try_swift_fill(
+        drift, priority_fee, swift_cu_limit,
+        filler_subaccount, signed_order, crosses,
+        tx_worker_ref.clone(),
+    ).await;
+}
+```
+
+### Crossing Regions
+
+The `CrossingRegion` determines which price levels to query:
+
+```rust
+pub enum CrossingRegion {
+    Above { price: u64 },      // Query asks above this price
+    Below { price: u64 },      // Query bids below this price
+    Between { low: u64, high: u64 },  // Query range
+}
+```
+
+**Example - Long Auction Order:**
+- Auction starts at oracle price, improves upward
+- Current auction price: $27.50
+- Crossing region: `Above { price: 27500000000 }`
+- Query: Resting asks at $27.50 or higher
+
+**Example - Short Market Order:**
+- Market order buys at best available price
+- Direction: Long (buying)
+- Crossing region: `Above { price: 0 }` (crosses all asks)
+- Query: All resting asks, starting from lowest price
+
+## Order Matching and Priority
+
+### Price-Time Priority
+
+DLOB respects standard orderbook priority:
+
+1. **Price Priority**: Better prices matched first
+   - Long taker: Lower ask prices first
+   - Short taker: Higher bid prices first
+
+2. **Time Priority**: Within same price level, FIFO
+   - Earlier orders filled before later orders
+   - Maintained by insertion order in data structure
+
+### Top Maker Queries
+
+For liquidations, the bot queries the best available makers:
+
+```rust
+let top_makers = dlob.get_top_makers(
+    market_index,
+    MarketType::Perp,
+    PositionDirection::Short,  // Want to buy (need short makers)
+    max_base_asset_amount,
+    oracle_price,
+    Some(&perp_market),
+);
+```
+
+**Use Case - Perp Liquidation:**
+
+Liquidatee has a 10 SOL long position that needs to be closed:
+
+1. **Query Top Makers**: Get best resting short orders (asks)
+2. **Select Makers**: Choose top N makers that can fill 10 SOL
+3. **Build Transaction**: Include maker accounts in `liquidate_perp_with_fill`
+4. **Execute**: Drift protocol matches liquidation against makers on-chain
+
+**Maker Selection Strategy:**
+- Prefer makers with best prices (lowest cost for liquidator)
+- Consider multiple makers to ensure full fill
+- Respect protocol limits (max 4-6 maker accounts per transaction)
+- Balance gas cost vs. execution quality
+
+## Real Implementation Details
+
+### Memory Efficiency
+
+DLOB must handle thousands of orders efficiently:
+
+**Optimization Techniques:**
+- Orders stored by reference to avoid copying
+- Price levels use efficient tree structures (BTreeMap)
+- Inactive orders removed immediately
+- Old slots garbage collected
+
+### Consistency Guarantees
+
+DLOB is eventually consistent with on-chain state:
+
+**Consistency Characteristics:**
+- Updates arrive via gRPC within ~10-50ms of on-chain change
+- Order may briefly appear after it's filled on-chain
+- Bot must handle "order already filled" errors gracefully
+- Critical: Always verify state on-chain before assuming success
+
+<Info>The DLOB's eventual consistency is acceptable because transactions always validate state on-chain. The DLOB is an optimization for opportunity detection, not the source of truth.</Info>
+
+### Handling Stale Orders
+
+Orders can become invalid between cross detection and execution:
+
+**Mitigation Strategies:**
+
+1. **Slot Limiter**: Avoid repeated attempts on same order (util.rs:28)
+   ```rust
+   pub struct OrderSlotLimiter<const N: usize> {
+       slots: [Vec<u32>; N],
+       generations: [u64; N],
+   }
+   
+   impl OrderSlotLimiter {
+       pub fn allow_event(&mut self, slot: u64, order_id: u32) -> bool {
+           // Returns false if order attempted recently
+       }
+   }
+   ```
+
+2. **Fresh State Checks**: Query DriftClient for latest state before transaction
+
+3. **Graceful Error Handling**: Treat "order not found" as competition, not bot error
+
+4. **Metrics Tracking**: Monitor stale order rate to detect DLOB lag issues
+
+### Performance Characteristics
+
+**Query Performance:**
+- `find_crosses_for_auctions`: O(A * log(O) * M)
+  - A = number of auction orders
+  - O = number of resting orders per market
+  - M = number of makers per cross
+- `find_crosses_for_taker_order`: O(log(O) * M)
+- `get_top_makers`: O(log(O) + M)
+
+**Typical Latency:**
+- Single market auction cross detection: ~50-200μs
+- All markets auction cross detection: ~500μs-2ms
+- Swift order cross detection: ~10-50μs
+
+<Note>These latencies are negligible compared to network latency (~10-50ms) and slot time (~400ms), making DLOB the performance bottleneck is virtually impossible.</Note>
+
+## Liquidator-Specific Usage
+
+Liquidator bots use DLOB differently than fillers:
+
+### Finding Liquidity for Liquidations
+
+When a liquidatable user is found:
+
+```rust
+// Find largest perp position
+let (market_index, position_size, direction) = 
+    find_largest_perp_position(&user);
+
+// Need opposite direction makers to close position
+let opposite_direction = match direction {
+    PositionDirection::Long => PositionDirection::Short,
+    PositionDirection::Short => PositionDirection::Long,
+};
+
+// Query DLOB for best makers
+let top_makers = dlob.get_top_makers(
+    market_index,
+    MarketType::Perp,
+    opposite_direction,
+    position_size,
+    oracle_price,
+    Some(&perp_market),
+);
+
+if top_makers.is_empty() {
+    // Not enough liquidity, skip this liquidation
+    return;
+}
+
+// Build liquidation transaction
+let ix = drift.liquidate_perp_with_fill(
+    liquidatee,
+    liquidator,
+    market_index,
+    position_size,
+    &top_makers,
+);
+```
+
+From liquidator overview in README.md:
+
+**Liquidation Strategy:**
+- Finds largest perp position
+- Queries DLOB for top makers (asks for longs, bids for shorts)
+- Builds `liquidate_perp_with_fill` transaction
+- Uses atomic on-chain matching against makers
+
+### Liquidity Assessment
+
+Before attempting a liquidation, assess if sufficient liquidity exists:
+
+```rust
+let available_liquidity = calculate_total_liquidity(
+    &top_makers, 
+    oracle_price, 
+    max_slippage
+);
+
+if available_liquidity < position_size * 0.5 {
+    // Less than 50% of position can be filled
+    // Liquidation may not be profitable
+    log::warn!("Insufficient liquidity for liquidation");
+    return;
+}
+```
+
+**Considerations:**
+- Must balance liquidation reward vs. execution cost
+- Partial liquidations are possible but increase complexity
+- Deep liquidity enables larger, more profitable liquidations
+
+## Best Practices
+
+### For Filler Bots
+
+1. **Filter Crosses Before Execution**:
+   - Use slot limiter to avoid repeated attempts
+   - Remove orders with insufficient remaining size
+   - Verify auction price still valid
+
+2. **Handle Partial Fills Gracefully**:
+   - DLOB may show cross, but maker filled by competitor
+   - Expect `actual_fills < expected_fills`
+   - Track metrics to optimize maker selection
+
+3. **Monitor DLOB Update Lag**:
+   - High lag indicates gRPC subscription issues
+   - Correlate with increased "order not found" errors
+   - May need to reconnect or switch gRPC endpoints
+
+### For Liquidator Bots
+
+1. **Query Multiple Makers**:
+   - Single maker may not have enough size
+   - Multiple makers increase fill probability
+   - Balance maker count vs. transaction size
+
+2. **Consider Maker Reliability**:
+   - Some makers may have invalid accounts
+   - Track which makers consistently fail
+   - May want to maintain maker blacklist
+
+3. **Fallback to AMM**:
+   - If DLOB liquidity insufficient, use vAMM
+   - Trade worse execution for guaranteed fill
+   - Essential for time-sensitive liquidations
+
+### General Best Practices
+
+1. **Never Trust DLOB Alone**:
+   - Always verify on-chain state before critical decisions
+   - DLOB is an optimization, not source of truth
+   - Build resilience to stale data
+
+2. **Profile Query Performance**:
+   - Measure cross detection latency
+   - Identify performance bottlenecks
+   - Optimize hot paths in main loop
+
+3. **Test with Realistic Data**:
+   - Populate test DLOB with market-like order distribution
+   - Verify cross detection correctness
+   - Test edge cases (empty orderbook, single order, etc.)
+
+<Note>The DLOB is the competitive advantage of keeper bots. Fast, accurate cross detection enables capturing opportunities before competitors.</Note>

@@ -1,0 +1,412 @@
+---
+title: 'Monitoring & Metrics'
+description: 'Monitor Keep-rs performance with Prometheus metrics and dashboard'
+---
+
+## Overview
+
+Keep-rs exposes Prometheus-compatible metrics and a real-time dashboard for monitoring bot performance. The metrics server runs on port 9898 by default.
+
+## Endpoints
+
+The HTTP server provides several endpoints:
+
+<CodeGroup>
+```bash Metrics Endpoint
+curl http://localhost:9898/metrics
+```
+
+```bash Dashboard
+# Open in browser
+http://localhost:9898/dashboard
+
+# Or root path
+http://localhost:9898/
+```
+
+```bash Dashboard API
+curl http://localhost:9898/api/dashboard
+```
+
+```bash Health Check
+curl http://localhost:9898/health
+```
+</CodeGroup>
+
+### Metrics Endpoint
+
+**URL**: `http://localhost:9898/metrics`
+
+Returns Prometheus-formatted metrics in `text/plain` format. This endpoint can be scraped by Prometheus for monitoring and alerting.
+
+### Dashboard Endpoint
+
+**URL**: `http://localhost:9898/dashboard` or `http://localhost:9898/`
+
+Provides a web-based dashboard showing:
+- High-risk users and liquidatable positions
+- Oracle price information
+- Real-time margin status
+- Position details
+
+### Dashboard API
+
+**URL**: `http://localhost:9898/api/dashboard`
+
+Returns JSON data for the dashboard, including:
+- High-risk users with margin requirements
+- Oracle prices with staleness indicators
+- Current slot and timestamps
+
+### Health Check
+
+**URL**: `http://localhost:9898/health`
+
+Returns HTTP 200 OK if the server is running. Use this for container health checks.
+
+## Available Metrics
+
+All metrics use the `rfb_` prefix (Rust Filler Bot).
+
+### Transaction Metrics
+
+<CodeGroup>
+```prometheus rfb_tx_sent_total
+# Number of transactions sent
+# Labels: intent
+rfb_tx_sent_total{intent="fill"} 1234
+rfb_tx_sent_total{intent="liquidate"} 56
+```
+
+```prometheus rfb_tx_confirmed_total
+# Number of transactions confirmed
+# Labels: intent, result
+rfb_tx_confirmed_total{intent="fill",result="success"} 1200
+rfb_tx_confirmed_total{intent="fill",result="partial"} 34
+```
+
+```prometheus rfb_tx_failed_total
+# Number of transactions failed
+# Labels: intent, reason
+rfb_tx_failed_total{intent="fill",reason="simulation_error"} 15
+rfb_tx_failed_total{intent="liquidate",reason="timeout"} 2
+```
+</CodeGroup>
+
+### Fill Metrics
+
+<CodeGroup>
+```prometheus rfb_fill_expected_total
+# Number of expected fills
+# Labels: intent
+rfb_fill_expected_total{intent="maker"} 500
+rfb_fill_expected_total{intent="taker"} 300
+```
+
+```prometheus rfb_fill_actual_total
+# Number of actual fills
+# Labels: intent
+rfb_fill_actual_total{intent="maker"} 495
+rfb_fill_actual_total{intent="taker"} 298
+```
+</CodeGroup>
+
+### Trigger Order Metrics
+
+<CodeGroup>
+```prometheus Trigger Orders
+# Number of expected triggered orders
+rfb_trigger_expected_total 150
+
+# Number of actual triggered orders
+rfb_trigger_actual_total 148
+```
+</CodeGroup>
+
+### Liquidation Metrics
+
+<CodeGroup>
+```prometheus rfb_liquidation_attempts_total
+# Number of liquidation attempts
+# Labels: type
+rfb_liquidation_attempts_total{type="perp"} 45
+rfb_liquidation_attempts_total{type="spot"} 12
+```
+
+```prometheus rfb_liquidation_success_total
+# Number of successful liquidations
+# Labels: type
+rfb_liquidation_success_total{type="perp"} 42
+rfb_liquidation_success_total{type="spot"} 11
+```
+
+```prometheus rfb_liquidation_failed_total
+# Number of failed liquidations
+# Labels: type
+rfb_liquidation_failed_total{type="perp"} 3
+rfb_liquidation_failed_total{type="spot"} 1
+```
+</CodeGroup>
+
+### Swap Quote Metrics
+
+<CodeGroup>
+```prometheus Swap Metrics
+# Swap quote request latency in milliseconds
+rfb_swap_quote_latency_ms 250
+
+# Number of Jupiter quote failures
+rfb_jupiter_quote_failures_total 5
+
+# Number of Titan quote failures
+rfb_titan_quote_failures_total 2
+```
+</CodeGroup>
+
+### Performance Metrics
+
+<CodeGroup>
+```prometheus rfb_tx_confirmation_slots
+# Histogram: Slots taken to confirm transactions
+# Labels: intent
+rfb_tx_confirmation_slots_bucket{intent="fill",le="10"} 850
+rfb_tx_confirmation_slots_bucket{intent="fill",le="20"} 1150
+rfb_tx_confirmation_slots_bucket{intent="fill",le="+Inf"} 1200
+```
+
+```prometheus rfb_tx_cu_spent
+# Histogram: Compute units spent per transaction
+# Labels: intent
+rfb_tx_cu_spent_bucket{intent="fill",le="50000"} 120
+rfb_tx_cu_spent_bucket{intent="fill",le="100000"} 980
+rfb_tx_cu_spent_bucket{intent="fill",le="+Inf"} 1200
+```
+</CodeGroup>
+
+## Configuration
+
+### Setting Metrics Port
+
+The metrics server port can be configured via environment variable:
+
+<CodeGroup>
+```bash Environment Variable
+export METRICS_PORT=9898
+```
+
+```bash .env File
+METRICS_PORT=9898
+```
+
+```bash Docker
+docker run -e METRICS_PORT=9898 -p 9898:9898 keeprs:latest
+```
+</CodeGroup>
+
+<Note>
+  The default port is 9898. Make sure to update port mappings if you change this value.
+</Note>
+
+## Prometheus Integration
+
+<Steps>
+  <Step title="Configure Prometheus">
+    Add Keep-rs to your `prometheus.yml`:
+    
+    ```yaml prometheus.yml
+    scrape_configs:
+      - job_name: 'keeprs'
+        static_configs:
+          - targets: ['localhost:9898']
+        scrape_interval: 15s
+    ```
+  </Step>
+
+  <Step title="Start Prometheus">
+    ```bash
+    prometheus --config.file=prometheus.yml
+    ```
+  </Step>
+
+  <Step title="Query Metrics">
+    Access Prometheus UI at `http://localhost:9090` and query metrics:
+    
+    ```promql
+    # Transaction success rate
+    rate(rfb_tx_confirmed_total[5m]) / rate(rfb_tx_sent_total[5m])
+    
+    # Fill efficiency
+    rfb_fill_actual_total / rfb_fill_expected_total
+    
+    # Average confirmation time
+    rate(rfb_tx_confirmation_slots_sum[5m]) / rate(rfb_tx_confirmation_slots_count[5m])
+    ```
+  </Step>
+</Steps>
+
+## Grafana Dashboards
+
+Create custom dashboards to visualize bot performance:
+
+### Key Metrics to Monitor
+
+**Transaction Performance**
+- Transaction send rate
+- Confirmation rate and time
+- Failure rate by reason
+- Compute units consumed
+
+**Fill Bot Performance**
+- Fill rate (expected vs actual)
+- Trigger order execution rate
+- Market-specific fill rates
+
+**Liquidator Performance**
+- Liquidation attempt rate
+- Success rate by type (perp/spot)
+- Response time to liquidatable positions
+
+**System Health**
+- Swap quote latency
+- Quote provider failures
+- Oracle price freshness
+
+### Example Grafana Queries
+
+<CodeGroup>
+```promql Transaction Success Rate
+sum(rate(rfb_tx_confirmed_total{result="success"}[5m])) / 
+sum(rate(rfb_tx_sent_total[5m])) * 100
+```
+
+```promql Fill Efficiency
+sum(rfb_fill_actual_total) / sum(rfb_fill_expected_total) * 100
+```
+
+```promql Liquidation Success Rate
+sum(rate(rfb_liquidation_success_total[5m])) / 
+sum(rate(rfb_liquidation_attempts_total[5m])) * 100
+```
+
+```promql Average Confirmation Time
+rate(rfb_tx_confirmation_slots_sum[5m]) / 
+rate(rfb_tx_confirmation_slots_count[5m])
+```
+</CodeGroup>
+
+## Alerting
+
+Set up alerts for critical conditions:
+
+<CodeGroup>
+```yaml High Failure Rate
+alert: HighTransactionFailureRate
+expr: |
+  sum(rate(rfb_tx_failed_total[5m])) / 
+  sum(rate(rfb_tx_sent_total[5m])) > 0.1
+for: 5m
+labels:
+  severity: warning
+annotations:
+  summary: "High transaction failure rate (&gt;10%)"
+```
+
+```yaml Low Fill Rate
+alert: LowFillEfficiency
+expr: |
+  sum(rfb_fill_actual_total) / 
+  sum(rfb_fill_expected_total) < 0.95
+for: 10m
+labels:
+  severity: warning
+annotations:
+  summary: "Fill efficiency below 95%"
+```
+
+```yaml Liquidation Failures
+alert: LiquidationFailures
+expr: |
+  sum(rate(rfb_liquidation_failed_total[5m])) > 0
+for: 5m
+labels:
+  severity: critical
+annotations:
+  summary: "Liquidation failures detected"
+```
+
+```yaml High Quote Latency
+alert: HighSwapQuoteLatency
+expr: rfb_swap_quote_latency_ms > 1000
+for: 5m
+labels:
+  severity: warning
+annotations:
+  summary: "Swap quote latency above 1 second"
+```
+</CodeGroup>
+
+## Dashboard State API
+
+The `/api/dashboard` endpoint returns detailed information about the liquidator bot:
+
+<CodeGroup>
+```json Response Structure
+{
+  "high_risk_users": [
+    {
+      "pubkey": "user_account_pubkey",
+      "authority": "authority_pubkey",
+      "total_collateral": 1000000,
+      "margin_requirement": 800000,
+      "free_margin": 200000,
+      "free_margin_ratio": 0.25,
+      "status": "HighRisk",
+      "last_updated_slot": 123456789,
+      "last_updated_ms": 1699999999999,
+      "positions": [
+        {
+          "market_type": "Perp",
+          "market_index": 0,
+          "base_asset_amount": 1000000000,
+          "quote_asset_amount": -50000000000
+        }
+      ]
+    }
+  ],
+  "oracle_prices": [
+    {
+      "market_type": "Perp",
+      "market_index": 0,
+      "price": 50000000000,
+      "last_updated_slot": 123456789,
+      "last_updated_ms": 1699999999999,
+      "age_slots": 5,
+      "age_ms": 2500,
+      "is_stale": false
+    }
+  ],
+  "current_slot": 123456794,
+  "last_updated_ms": 1699999999999
+}
+```
+</CodeGroup>
+
+### Margin Status Values
+
+- **Liquidatable**: User can be liquidated (total collateral &lt; margin requirement)
+- **HighRisk**: User is not liquidatable but has low free margin (&lt;20% of requirement)
+- **Safe**: User has sufficient margin
+
+## Monitoring Best Practices
+
+1. **Set up automated alerts** for transaction failures and liquidation issues
+2. **Monitor fill efficiency** to ensure the bot is capturing opportunities
+3. **Track confirmation times** to optimize priority fees
+4. **Watch swap quote latency** for DEX integration issues
+5. **Review dashboard regularly** for high-risk users and oracle health
+6. **Set up log aggregation** for detailed error analysis
+7. **Monitor compute unit usage** to optimize transaction costs
+
+<Note>
+  The metrics endpoint is lightweight and can be scraped frequently (every 10-15 seconds) without impacting bot performance.
+</Note>

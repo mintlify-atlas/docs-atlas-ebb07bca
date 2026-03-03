@@ -1,0 +1,276 @@
+---
+title: "Installation"
+description: "Install and configure Keep-rs keeper bots for Drift Protocol"
+---
+
+# Installation
+
+This guide will walk you through installing Keep-rs and configuring it to run keeper bots on Drift Protocol.
+
+## Prerequisites
+
+Before installing Keep-rs, ensure you have the following:
+
+### Required Software
+
+<Steps>
+  <Step title="Rust Toolchain">
+    Install Rust 1.87.0 or later using rustup:
+    
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    rustup component add rustfmt
+    ```
+    
+    Verify installation:
+    ```bash
+    rustc --version
+    cargo --version
+    ```
+  </Step>
+
+  <Step title="Solana CLI (Optional)">
+    If you need to create a new wallet or manage keys:
+    
+    ```bash
+    sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+    ```
+    
+    Generate a new keypair:
+    ```bash
+    solana-keygen new --outfile ~/bot-keypair.json
+    ```
+  </Step>
+
+  <Step title="Git">
+    Ensure Git is installed for cloning the repository:
+    
+    ```bash
+    git --version
+    ```
+  </Step>
+</Steps>
+
+### Required Access & Credentials
+
+<Warning>
+You will need the following credentials before running the bots. Some require paid subscriptions.
+</Warning>
+
+- **Bot Wallet**: A Solana wallet with SOL for transaction fees (base58 encoded private key)
+- **RPC Endpoint**: A Solana RPC provider (e.g., Helius, QuickNode, Triton)
+- **gRPC Access**: Drift Protocol gRPC endpoint and authentication token
+- **Pyth Lazer Token**: For real-time price feeds (optional but recommended)
+
+## Clone and Build
+
+<Steps>
+  <Step title="Clone the Repository">
+    Clone the Keep-rs repository from GitHub:
+    
+    ```bash
+    git clone https://github.com/drift-labs/keep-rs.git
+    cd keep-rs
+    ```
+  </Step>
+
+  <Step title="Build the Project">
+    Build the release binary with optimizations:
+    
+    ```bash
+    cargo build --release
+    ```
+    
+    This will compile the `keeprs` binary to `target/release/keeprs`.
+    
+    <Note>
+    The first build may take several minutes as Cargo downloads and compiles all dependencies. Subsequent builds will be faster due to caching.
+    </Note>
+  </Step>
+
+  <Step title="Verify the Build">
+    Check that the binary was created successfully:
+    
+    ```bash
+    ./target/release/keeprs --help
+    ```
+    
+    You should see the help output with available command-line options.
+  </Step>
+</Steps>
+
+## Configure Environment Variables
+
+<Steps>
+  <Step title="Copy Environment Template">
+    Create your environment configuration from the example file:
+    
+    ```bash
+    cp .env.example .env
+    ```
+  </Step>
+
+  <Step title="Edit Required Variables">
+    Open `.env` in your editor and configure the required variables:
+    
+    ```bash
+    # Required: Bot wallet private key (base58 encoded)
+    BOT_PRIVATE_KEY="your_base58_private_key_here"
+    
+    # Required: Solana RPC endpoint
+    RPC_URL="https://api.mainnet-beta.solana.com"
+    
+    # Required: Drift gRPC configuration
+    GRPC_ENDPOINT="https://api.rpcpool.com"
+    GRPC_X_TOKEN="your_grpc_token_here"
+    
+    # Optional: Pyth price feed access token
+    PYTH_LAZER_TOKEN="your_pyth_token_here"
+    ```
+    
+    <Warning>
+    Never commit your `.env` file to version control. It contains sensitive credentials.
+    </Warning>
+  </Step>
+
+  <Step title="Configure Optional Variables">
+    Customize additional settings as needed:
+    
+    ```bash
+    # Metrics server port (default: 9898)
+    METRICS_PORT=9898
+    
+    # Market IDs to operate on (comma-separated, default: "0,1,2")
+    # Market 0 = SOL-PERP, 1 = BTC-PERP, 2 = ETH-PERP
+    MARKET_IDS="0,1,2"
+    
+    # Network selection (default: true)
+    MAINNET=true
+    
+    # Dry run mode - simulate without sending transactions (default: false)
+    DRY_RUN=false
+    ```
+  </Step>
+</Steps>
+
+## Environment Variable Reference
+
+### Required Variables
+
+| Variable | Description | Example |
+|----------|-------------|----------|
+| `BOT_PRIVATE_KEY` | Base58 encoded Solana private key for your bot wallet | `5J7W...` |
+| `RPC_URL` | Solana RPC endpoint URL | `https://api.mainnet-beta.solana.com` |
+| `GRPC_ENDPOINT` | Drift Protocol gRPC endpoint | `https://api.rpcpool.com` |
+| `GRPC_X_TOKEN` | Authentication token for gRPC access | `your_token` |
+
+### Optional Variables
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `PYTH_LAZER_TOKEN` | Pyth Lazer price feed token | None |
+| `METRICS_PORT` | Port for Prometheus metrics server | `9898` |
+| `MARKET_IDS` | Comma-separated perp market indices | `"0,1,2"` |
+| `MAINNET` | Use mainnet (true) or devnet (false) | `true` |
+| `DRY_RUN` | Simulate transactions without sending | `false` |
+
+## Getting Access Credentials
+
+### Bot Wallet Setup
+
+Your bot needs a funded Solana wallet:
+
+1. **Create a new keypair** (if you don't have one):
+   ```bash
+   solana-keygen new --outfile ~/bot-keypair.json
+   ```
+
+2. **Export as base58**:
+   ```bash
+   cat ~/bot-keypair.json | jq -r 'map(tostring) | join(",")' | base58
+   ```
+
+3. **Fund the wallet**: Transfer SOL to your bot's address for transaction fees
+   - Minimum recommended: 0.5 SOL for fillers, 1-5 SOL for liquidators
+
+### RPC Provider
+
+<Note>
+The public RPC endpoint (`https://api.mainnet-beta.solana.com`) has rate limits. For production use, sign up for a dedicated RPC provider:
+</Note>
+
+- [Helius](https://helius.dev)
+- [QuickNode](https://quicknode.com)
+- [Triton](https://triton.one)
+- [Alchemy](https://alchemy.com)
+
+### gRPC Access
+
+Contact the Drift Protocol team to get gRPC access:
+- Join the [Drift Discord](https://discord.gg/drift)
+- Request keeper bot access in the developer channels
+- Receive your `GRPC_ENDPOINT` and `GRPC_X_TOKEN`
+
+### Pyth Lazer (Optional)
+
+For the fastest price feeds:
+- Visit [Pyth Network](https://pyth.network)
+- Sign up for Pyth Lazer access
+- Generate an API token
+
+## Docker Installation (Alternative)
+
+If you prefer to run Keep-rs in Docker:
+
+<Steps>
+  <Step title="Build the Docker Image">
+    ```bash
+    docker build -t keeprs .
+    ```
+    
+    This creates an optimized multi-stage build with all dependencies.
+  </Step>
+
+  <Step title="Run with Environment File">
+    ```bash
+    docker run --env-file .env -p 9898:9898 keeprs --mainnet --filler
+    ```
+  </Step>
+</Steps>
+
+<Note>
+The Docker image exposes port 9898 for metrics. Map it to your host with `-p 9898:9898` to access the metrics and health endpoints.
+</Note>
+
+## Verify Installation
+
+Test that everything is configured correctly:
+
+```bash
+# Run in dry-run mode to verify configuration without sending transactions
+RUST_LOG=info cargo run --release -- --mainnet --filler --dry
+```
+
+You should see log output indicating:
+- Bot wallet loaded successfully
+- Connected to RPC endpoint
+- gRPC subscriptions established
+- Metrics server running on port 9898
+
+Check the metrics endpoint:
+```bash
+curl http://localhost:9898/health
+```
+
+If you see a success response, your installation is complete!
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start Guide" icon="rocket" href="/quickstart">
+    Get your first bot running with step-by-step instructions
+  </Card>
+  <Card title="Configuration Reference" icon="gear" href="/bots/configuration">
+    Learn about all available configuration options
+  </Card>
+</CardGroup>

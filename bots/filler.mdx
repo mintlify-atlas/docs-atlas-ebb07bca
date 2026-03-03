@@ -1,0 +1,211 @@
+---
+title: 'Filler Bot'
+description: 'Match swift orders, auction orders, and uncross limit orders against resting liquidity'
+---
+
+## Overview
+
+The Filler Bot is a keeper bot that matches orders against resting liquidity on the Drift protocol. It performs three main functions:
+
+1. **Swift Order Matching**: Matches swift orders (fast, off-chain signed orders) against resting limit orders in the orderbook
+2. **Auction Order Filling**: Fills on-chain auction orders by finding the best available liquidity
+3. **Limit Order Uncrossing**: Identifies and executes crossed limit orders where bid prices exceed ask prices
+
+The bot subscribes to real-time updates via gRPC and Pyth price feeds, maintains a decentralized limit order book (DLOB) in memory, and continuously searches for profitable fill opportunities.
+
+## How It Works
+
+### Event Flow
+
+The Filler Bot operates through several concurrent event streams:
+
+- **gRPC Slot Updates**: Triggers periodic orderbook scanning for crosses
+- **gRPC Account Updates**: Updates the DLOB with new/modified orders
+- **Swift Order Stream**: Receives new swift orders via websocket
+- **Pyth Price Feeds**: Provides real-time oracle price updates
+
+When a fillable order is detected, the bot builds a transaction with:
+- Appropriate compute unit limits
+- Dynamic priority fees (based on current network conditions)
+- Fill instructions with optimal maker-taker matching
+
+### Transaction Lifecycle
+
+1. **Detection**: Cross or fillable order identified
+2. **Building**: Transaction constructed with fill instructions
+3. **Sending**: Signed transaction sent to Solana network
+4. **Confirmation**: Transaction status monitored via gRPC updates
+5. **Metrics**: Performance tracked (fills, revenue, competition)
+
+## Running the Filler Bot
+
+### Basic Usage
+
+<CodeGroup>
+
+```bash Mainnet
+RUST_LOG=filler=info,dlob=info,swift=info \
+    cargo run --release -- --mainnet --filler
+```
+
+```bash Devnet
+RUST_LOG=filler=info,dlob=info,swift=info \
+    cargo run --release -- --filler
+```
+
+```bash Dry Run (Simulation)
+RUST_LOG=filler=info,dlob=info,swift=info \
+    cargo run --release -- --mainnet --filler --dry
+```
+
+</CodeGroup>
+
+### Fill Specific Markets
+
+```bash
+# Fill only SOL-PERP (market 0) and BTC-PERP (market 1)
+cargo run --release -- --mainnet --filler --market-ids "0,1"
+
+# Fill all available markets
+cargo run --release -- --mainnet --filler --all-markets
+```
+
+## Configuration
+
+### CLI Flags
+
+<ParamField path="--filler" type="boolean" default="true">
+  Enable the filler bot mode. This is the default mode when no other bot flag is specified.
+</ParamField>
+
+<ParamField path="--all-markets" type="boolean" default="false">
+  Fill orders for all available markets. When enabled, this overrides the `--market-ids` flag and the bot will monitor all perpetual markets (excluding bet markets and uninitialized markets).
+</ParamField>
+
+<ParamField path="--market-ids" type="string" default="0,1,2">
+  Comma-separated list of perpetual market indices to fill orders for. Can also be set via the `MARKET_IDS` environment variable.
+  
+  Example: `--market-ids "0,1,2,3,4"` to fill SOL, BTC, ETH, APT, and ARB markets.
+</ParamField>
+
+<ParamField path="--swift-cu-limit" type="u32" default="364000">
+  Compute unit limit for swift order fill transactions. Swift fills typically require more compute units due to signature verification and off-chain order validation.
+</ParamField>
+
+<ParamField path="--fill-cu-limit" type="u32" default="256000">
+  Compute unit limit for regular auction and limit order fill transactions. Standard fills generally require fewer compute units than swift fills.
+</ParamField>
+
+<ParamField path="--priority-fee" type="u64" default="512">
+  Base priority fee in microlamports per compute unit. The actual priority fee may be dynamically adjusted based on network congestion and recent transaction data.
+</ParamField>
+
+<ParamField path="--mainnet" type="boolean" default="true">
+  Connect to Solana mainnet-beta. When set to false, connects to devnet. Can also be set via the `MAINNET` environment variable.
+</ParamField>
+
+<ParamField path="--dry" type="boolean" default="false">
+  Enable dry-run mode. Transactions are simulated but not actually sent to the network. Useful for testing configuration and strategy without risking funds. Can also be set via the `DRY_RUN` environment variable.
+</ParamField>
+
+<ParamField path="--sub-account-id" type="u16" default="0">
+  Sub-account ID to use for the bot's Drift account. Allows running multiple bots with different sub-accounts from the same wallet.
+</ParamField>
+
+## Environment Variables
+
+### Required
+
+<ParamField path="BOT_PRIVATE_KEY" type="string" required>
+  Base58-encoded private key for the bot's Solana wallet. This wallet should have sufficient SOL for transaction fees and USDC for settling trades.
+</ParamField>
+
+<ParamField path="RPC_URL" type="string" required>
+  Solana RPC endpoint URL. Use a high-performance RPC provider for best results.
+  
+  Example: `https://api.mainnet-beta.solana.com`
+</ParamField>
+
+<ParamField path="GRPC_ENDPOINT" type="string" required>
+  Drift gRPC endpoint for real-time account and slot updates.
+  
+  Example: `https://api.rpcpool.com`
+</ParamField>
+
+<ParamField path="GRPC_X_TOKEN" type="string" required>
+  Authentication token for the gRPC endpoint.
+</ParamField>
+
+<ParamField path="PYTH_LAZER_TOKEN" type="string" required>
+  Pyth Lazer access token for real-time price feeds. The bot uses Pyth for accurate oracle price data.
+</ParamField>
+
+### Optional
+
+<ParamField path="METRICS_PORT" type="number" default="9898">
+  Port for the Prometheus metrics HTTP server. Metrics include fill counts, revenue, transaction success rates, and more.
+</ParamField>
+
+<ParamField path="MARKET_IDS" type="string" default="0,1,2">
+  Default market IDs to fill. Can be overridden by the `--market-ids` CLI flag.
+</ParamField>
+
+## Monitoring
+
+The Filler Bot exposes several HTTP endpoints for monitoring:
+
+- `http://localhost:9898/metrics` - Prometheus metrics
+- `http://localhost:9898/health` - Health check endpoint
+- `http://localhost:9898/dashboard` - Human-readable dashboard
+
+### Key Metrics
+
+- **Fills**: Total number of successful fills
+- **Revenue**: Profit from maker rebates and taker fees
+- **Transaction Success Rate**: Percentage of sent transactions that confirmed successfully
+- **Competition**: Orders that were filled by others before us
+- **Order DNE**: "Order Does Not Exist" errors (order was cancelled or already filled)
+
+## Performance Tuning
+
+<Tip>
+  **Compute Unit Limits**: If you see transactions failing with "Compute Unit Exceeded" errors, increase the `--swift-cu-limit` or `--fill-cu-limit` values.
+</Tip>
+
+<Tip>
+  **Priority Fees**: During high network congestion, increase the `--priority-fee` to improve transaction landing rates. The bot uses dynamic priority fee calculation, but the base fee serves as a minimum.
+</Tip>
+
+<Tip>
+  **Market Selection**: Start with fewer markets (`--market-ids "0,1"`) to reduce compute requirements and focus on high-volume markets like SOL and BTC.
+</Tip>
+
+## Common Issues
+
+### Order Does Not Exist Errors
+
+This is normal and indicates healthy competition. It means another keeper filled the order before your transaction landed. Monitor the `order_dne_count` metric to understand competition levels.
+
+### Transaction Timeouts
+
+If transactions frequently timeout:
+1. Verify your RPC endpoint is reliable and low-latency
+2. Increase priority fees
+3. Check network congestion on Solana
+
+### No Fills
+
+If the bot is running but not executing fills:
+1. Verify the markets you're monitoring have active orderbook activity
+2. Check that oracle prices are updating (look for gRPC slot updates in logs)
+3. Ensure your wallet has sufficient USDC balance for settling trades
+4. Verify gRPC and Pyth subscriptions are connected (check logs for "subscribed" messages)
+
+## Source Code Reference
+
+The Filler Bot implementation can be found in `src/filler.rs`. Key components:
+
+- **FillerBot struct** (`src/filler.rs:47`): Main bot structure
+- **FillerBot::new** (`src/filler.rs:62`): Initialization and subscription setup
+- **FillerBot::run** (`src/filler.rs:144`): Main event loop
+- **Config struct** (`src/main.rs:27`): CLI configuration options

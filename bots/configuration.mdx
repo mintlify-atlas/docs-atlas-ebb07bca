@@ -1,0 +1,443 @@
+---
+title: 'Configuration Reference'
+description: 'Complete reference for environment variables and CLI flags'
+---
+
+## Overview
+
+The Keep-rs bots can be configured through a combination of environment variables (via `.env` file) and command-line flags. CLI flags take precedence over environment variables when both are specified.
+
+## Environment Variables
+
+Environment variables are loaded from a `.env` file in the project root. Copy `.env.example` to `.env` and configure with your credentials.
+
+### Required Variables
+
+<ParamField path="BOT_PRIVATE_KEY" type="string" required>
+  **Base58-encoded Solana private key** for the bot's wallet.
+  
+  This wallet is used to sign and send all transactions. It should have:
+  - Sufficient SOL for transaction fees (recommend 0.5+ SOL)
+  - USDC collateral in Drift for settling trades and liquidations
+  - Proper permissions on your Drift account
+  
+  Example:
+  ```bash
+  BOT_PRIVATE_KEY="5Kd7b8cN9..."
+  ```
+  
+  <Warning>Never commit your private key to version control. Keep `.env` in `.gitignore`.</Warning>
+</ParamField>
+
+<ParamField path="RPC_URL" type="string" required>
+  **Solana RPC endpoint** for submitting transactions and querying blockchain state.
+  
+  For best performance, use a dedicated RPC provider with high rate limits and low latency.
+  
+  Examples:
+  ```bash
+  # Mainnet
+  RPC_URL="https://api.mainnet-beta.solana.com"
+  
+  # Devnet
+  RPC_URL="https://api.devnet.solana.com"
+  
+  # Custom provider
+  RPC_URL="https://your-rpc-provider.com/your-api-key"
+  ```
+</ParamField>
+
+<ParamField path="GRPC_ENDPOINT" type="string" required>
+  **Drift gRPC endpoint** for real-time account updates, slot updates, and transaction confirmations.
+  
+  The gRPC connection provides:
+  - Real-time user account updates
+  - Market and oracle account updates
+  - Slot updates for orderbook state
+  - Transaction confirmation notifications
+  
+  Example:
+  ```bash
+  GRPC_ENDPOINT="https://api.rpcpool.com"
+  ```
+</ParamField>
+
+<ParamField path="GRPC_X_TOKEN" type="string" required>
+  **Authentication token** for the gRPC endpoint.
+  
+  Contact your gRPC provider for access credentials.
+  
+  Example:
+  ```bash
+  GRPC_X_TOKEN="your_grpc_token_here"
+  ```
+</ParamField>
+
+<ParamField path="PYTH_LAZER_TOKEN" type="string" required>
+  **Pyth Lazer access token** for real-time price feeds.
+  
+  Pyth Lazer provides high-frequency oracle price updates that are critical for:
+  - Accurate fill pricing (filler bot)
+  - Margin calculations (liquidator bot)
+  - Auction price calculations
+  
+  Get your token at: https://www.pyth.network/
+  
+  Example:
+  ```bash
+  PYTH_LAZER_TOKEN="your_pyth_token_here"
+  ```
+</ParamField>
+
+### Optional Variables
+
+<ParamField path="METRICS_PORT" type="number" default="9898">
+  **HTTP port** for the Prometheus metrics server and dashboard.
+  
+  The metrics server exposes:
+  - `/metrics` - Prometheus-format metrics
+  - `/health` - Health check endpoint
+  - `/dashboard` - Human-readable status page
+  - `/api/dashboard` - JSON dashboard data (liquidator only)
+  
+  Example:
+  ```bash
+  METRICS_PORT=9898
+  ```
+</ParamField>
+
+<ParamField path="MARKET_IDS" type="string" default="0,1,2">
+  **Comma-separated list** of perpetual market indices for the filler bot to monitor.
+  
+  Market indices:
+  - `0` = SOL-PERP
+  - `1` = BTC-PERP
+  - `2` = ETH-PERP
+  - (Additional markets vary by deployment)
+  
+  Can be overridden by `--market-ids` CLI flag.
+  
+  Examples:
+  ```bash
+  # Monitor SOL and BTC only
+  MARKET_IDS="0,1"
+  
+  # Monitor first 5 markets
+  MARKET_IDS="0,1,2,3,4"
+  ```
+</ParamField>
+
+<ParamField path="MAINNET" type="boolean" default="true">
+  **Network selection**: `true` for mainnet-beta, `false` for devnet.
+  
+  Can be overridden by `--mainnet` CLI flag.
+  
+  Examples:
+  ```bash
+  # Use mainnet (default)
+  MAINNET=true
+  
+  # Use devnet for testing
+  MAINNET=false
+  ```
+</ParamField>
+
+<ParamField path="DRY_RUN" type="boolean" default="false">
+  **Dry-run mode**: When `true`, transactions are simulated but not sent to the network.
+  
+  Useful for:
+  - Testing configuration
+  - Validating strategy logic
+  - Estimating profitability without risk
+  
+  Can be overridden by `--dry` CLI flag.
+  
+  Example:
+  ```bash
+  DRY_RUN=true
+  ```
+</ParamField>
+
+## CLI Flags
+
+Command-line flags configure bot behavior and override environment variables.
+
+### Bot Mode Selection
+
+<ParamField path="--filler" type="boolean" default="true">
+  Run the **Filler Bot** to match orders against resting liquidity.
+  
+  Usage:
+  ```bash
+  cargo run --release -- --filler
+  ```
+  
+  <Info>This is the default mode when neither `--filler` nor `--liquidator` is specified.</Info>
+</ParamField>
+
+<ParamField path="--liquidator" type="boolean" default="false">
+  Run the **Liquidator Bot** to liquidate undercollateralized positions.
+  
+  Usage:
+  ```bash
+  cargo run --release -- --liquidator
+  ```
+  
+  <Warning>Running liquidator mode disables filler mode. Only one can be active at a time.</Warning>
+</ParamField>
+
+### Network Configuration
+
+<ParamField path="--mainnet" type="boolean" default="true">
+  Connect to **Solana mainnet-beta**. When `false`, connects to devnet.
+  
+  Usage:
+  ```bash
+  # Mainnet (default)
+  cargo run --release -- --mainnet
+  
+  # Devnet
+  cargo run --release -- --mainnet=false
+  ```
+  
+  Overrides `MAINNET` environment variable.
+</ParamField>
+
+<ParamField path="--dry" type="boolean" default="false">
+  Enable **dry-run mode**. Transactions are simulated but not sent.
+  
+  Usage:
+  ```bash
+  cargo run --release -- --dry
+  ```
+  
+  Overrides `DRY_RUN` environment variable.
+</ParamField>
+
+### Filler-Specific Flags
+
+<ParamField path="--all-markets" type="boolean" default="false">
+  Monitor and fill orders for **all available perpetual markets**.
+  
+  When enabled, this overrides `--market-ids` and automatically discovers all active perp markets (excluding bet markets and uninitialized markets).
+  
+  Usage:
+  ```bash
+  cargo run --release -- --filler --all-markets
+  ```
+</ParamField>
+
+<ParamField path="--market-ids" type="string" default="0,1,2">
+  **Comma-separated list** of perpetual market indices to monitor.
+  
+  Usage:
+  ```bash
+  # SOL and BTC only
+  cargo run --release -- --filler --market-ids "0,1"
+  
+  # First 5 markets
+  cargo run --release -- --filler --market-ids "0,1,2,3,4"
+  ```
+  
+  Can also be set via `MARKET_IDS` environment variable.
+</ParamField>
+
+<ParamField path="--swift-cu-limit" type="u32" default="364000">
+  **Compute unit limit** for swift order fill transactions.
+  
+  Swift fills require more compute due to off-chain signature verification. Increase this if transactions fail with "Compute Unit Exceeded" errors.
+  
+  Usage:
+  ```bash
+  cargo run --release -- --filler --swift-cu-limit 400000
+  ```
+</ParamField>
+
+<ParamField path="--fill-cu-limit" type="u32" default="256000">
+  **Compute unit limit** for regular auction and limit order fill transactions.
+  
+  Standard fills typically require fewer compute units than swift fills.
+  
+  Usage:
+  ```bash
+  cargo run --release -- --filler --fill-cu-limit 300000
+  ```
+</ParamField>
+
+### Liquidator-Specific Flags
+
+<ParamField path="--min-collateral" type="u64" default="1000000">
+  **Minimum collateral threshold** (in USDC micro-units) for liquidation.
+  
+  Accounts with total collateral below this value are skipped. This prevents wasting gas on dust liquidations.
+  
+  Units: USDC micro-units (6 decimals)
+  - `1000000` = 1 USDC
+  - `5000000` = 5 USDC
+  - `10000000` = 10 USDC
+  
+  Usage:
+  ```bash
+  # 5 USDC minimum
+  cargo run --release -- --liquidator --min-collateral 5000000
+  ```
+</ParamField>
+
+<ParamField path="--use-spot-liquidation" type="boolean" default="true">
+  Enable **spot liquidation** using Jupiter swaps.
+  
+  When enabled, the bot will liquidate spot borrow positions using atomic swaps. When disabled, only perpetual positions are liquidated.
+  
+  Usage:
+  ```bash
+  # Disable spot liquidation (perp only)
+  cargo run --release -- --liquidator --use-spot-liquidation false
+  ```
+</ParamField>
+
+### Transaction Configuration
+
+<ParamField path="--priority-fee" type="u64" default="512">
+  **Base priority fee** in microlamports per compute unit.
+  
+  The actual priority fee may be dynamically adjusted based on:
+  - Recent successful transactions (priority fee subscriber)
+  - Network congestion levels
+  - Bot mode (liquidator uses 60th percentile)
+  
+  Usage:
+  ```bash
+  cargo run --release -- --priority-fee 1000
+  ```
+</ParamField>
+
+<ParamField path="--sub-account-id" type="u16" default="0">
+  **Drift sub-account ID** to use for the bot.
+  
+  Allows running multiple bots from the same wallet using different Drift sub-accounts.
+  
+  Usage:
+  ```bash
+  # Use sub-account 1
+  cargo run --release -- --sub-account-id 1
+  ```
+</ParamField>
+
+## Configuration Examples
+
+### Filler Bot - Mainnet Production
+
+```bash
+# .env file
+BOT_PRIVATE_KEY="your_private_key"
+RPC_URL="https://your-rpc-provider.com"
+GRPC_ENDPOINT="https://api.rpcpool.com"
+GRPC_X_TOKEN="your_token"
+PYTH_LAZER_TOKEN="your_pyth_token"
+MARKET_IDS="0,1,2"
+```
+
+```bash
+# Run command
+RUST_LOG=filler=info,dlob=info,swift=info \
+    cargo run --release -- --mainnet --filler
+```
+
+### Liquidator Bot - Devnet Testing
+
+```bash
+# .env file
+BOT_PRIVATE_KEY="your_devnet_private_key"
+RPC_URL="https://api.devnet.solana.com"
+GRPC_ENDPOINT="https://devnet.rpcpool.com"
+GRPC_X_TOKEN="your_token"
+PYTH_LAZER_TOKEN="your_pyth_token"
+MAINNET=false
+```
+
+```bash
+# Run command (dry-run)
+RUST_LOG=liquidator=info \
+    cargo run --release -- --liquidator --dry
+```
+
+### Filler Bot - High-Volume Markets Only
+
+```bash
+# Focus on SOL and BTC with higher compute budgets
+cargo run --release -- \
+    --mainnet \
+    --filler \
+    --market-ids "0,1" \
+    --swift-cu-limit 400000 \
+    --fill-cu-limit 300000 \
+    --priority-fee 1000
+```
+
+### Liquidator Bot - Conservative Settings
+
+```bash
+# Liquidate only positions &gt;10 USDC, perp-only
+cargo run --release -- \
+    --mainnet \
+    --liquidator \
+    --min-collateral 10000000 \
+    --use-spot-liquidation false
+```
+
+## Troubleshooting
+
+### Missing Environment Variables
+
+```
+Error: environment variable not found: BOT_PRIVATE_KEY
+```
+
+**Solution**: Ensure `.env` file exists and contains all required variables. Copy from `.env.example`:
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+```
+
+### Invalid Private Key Format
+
+```
+Error: loaded BOT_PRIVATE_KEY: invalid base58 encoding
+```
+
+**Solution**: Ensure `BOT_PRIVATE_KEY` is base58-encoded. Export from Phantom/Solflare in base58 format.
+
+### RPC Connection Issues
+
+```
+Error: RPC request failed
+```
+
+**Solution**: 
+1. Verify `RPC_URL` is correct and accessible
+2. Check your RPC provider rate limits
+3. Test connection manually:
+
+```bash
+curl -X POST $RPC_URL \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+```
+
+### gRPC Subscription Failures
+
+```
+Error: failed to subscribe gRPC
+```
+
+**Solution**:
+1. Verify `GRPC_ENDPOINT` and `GRPC_X_TOKEN` are correct
+2. Check your gRPC provider status
+3. Ensure your IP is allowlisted (if required)
+
+## Source Reference
+
+- **Config struct**: `src/main.rs:27-59`
+- **Environment loading**: `src/main.rs:85-86` (dotenv)
+- **Config parsing**: `src/main.rs:87` (clap parser)

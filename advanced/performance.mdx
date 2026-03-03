@@ -1,0 +1,498 @@
+---
+title: 'Performance Optimization'
+description: 'Optimize your Keep-rs bot for maximum profitability and efficiency'
+icon: 'gauge-high'
+---
+
+## Priority Fee Optimization
+
+Priority fees determine transaction ordering on Solana. Higher fees increase the chance of being included in the next block.
+
+### Priority Fee Subscriber
+
+The bot uses `PriorityFeeSubscriber` to get dynamic priority fees based on recent network activity (filler.rs:96-98):
+
+```rust
+let priority_fee_subscriber = PriorityFeeSubscriber::new(
+    drift.rpc().url(),
+    &market_pubkeys  // Monitor fees for specific markets
+);
+let priority_fee_subscriber = priority_fee_subscriber.subscribe();
+```
+
+### Fee Percentiles
+
+Different operations use different percentile targets:
+
+**Swift Orders** (filler.rs:240)
+```rust
+let pf = priority_fee_subscriber.priority_fee_nth(0.6);  // 60th percentile
+```
+
+**Auction Fills** (filler.rs:261)
+```rust
+let priority_fee = priority_fee_subscriber.priority_fee_nth(0.5) + slot % 2;
+// 50th percentile + entropy for unique tx hash
+```
+
+**Liquidations** (liquidator.rs via worker)
+```rust
+let priority_fee = priority_fee_subscriber.priority_fee_nth(0.6);  // 60th percentile
+```
+
+<Tip>
+**Strategy**: Use higher percentiles (0.7-0.9) during high competition periods or for high-value fills. Lower percentiles (0.3-0.5) work for routine operations.
+</Tip>
+
+### Entropy for Resubmissions
+
+When resubmitting transactions across consecutive slots, the bot adds entropy to produce unique transaction hashes (filler.rs:261):
+
+```rust
+let priority_fee = priority_fee_subscriber.priority_fee_nth(0.5) + slot % 2;
+```
+
+This prevents transaction deduplication by Solana validators.
+
+## Compute Unit Management
+
+Compute units (CUs) are the execution budget for Solana transactions. Insufficient CUs cause transaction failures.
+
+### Configuration
+
+Set via command-line flags:
+
+```bash
+cargo run --release -- --mainnet --filler \
+  --fill-cu-limit 400000 \
+  --swift-cu-limit 350000
+```
+
+Or environment variables:
+```bash
+export FILL_CU_LIMIT=400000
+export SWIFT_CU_LIMIT=350000
+```
+
+### Dynamic CU Adjustment
+
+The bot automatically increases CU limits based on transaction complexity:
+
+**Swift Fills** (filler.rs:462-469)
+```rust
+// Large accounts list, bump CU limit
+if ix.accounts.len() >= 30 {
+    tx_builder = tx_builder.set_ix(
+        1,
+        ComputeBudgetInstruction::set_compute_unit_limit(cu_limit * 2),
+    );
+}
+```
+
+**Auction Fills** (filler.rs:633-641)
+```rust
+if ix.accounts.len() >= 20 {
+    tx_builder = tx_builder.set_ix(
+        1,
+        ComputeBudgetInstruction::set_compute_unit_limit(cu_limit * 2),
+    );
+}
+```
+
+**Limit Uncross** (filler.rs:759-765)
+```rust
+if ix.accounts.len() >= 40 {
+    tx_builder = tx_builder.set_ix(
+        1,
+        ComputeBudgetInstruction::set_compute_unit_limit((cu_limit * 25) / 10),
+    );
+}
+```
+
+<Tip>
+**Best Practice**: Start with moderate CU limits (300k-400k) and monitor `cu_spent` metrics. Increase only if you see `insufficient_cus` errors.
+</Tip>
+
+### CU Spent Metrics
+
+Track actual CU consumption to optimize limits (filler.rs:1120-1125):
+
+```rust
+let cus_spent = sent_cu_limit - meta.compute_units_consumed.unwrap();
+metrics.cu_spent
+    .with_label_values(&[intent_label])
+    .observe(cus_spent as f64);
+```
+
+View via metrics endpoint:
+```bash
+curl http://localhost:8080/metrics | grep cu_spent
+```
+
+## Rate Limiting Mechanisms
+
+### Liquidation Rate Limit
+
+Prevents spamming liquidation attempts on the same user (liquidator.rs:46):
+
+```rust
+const LIQUIDATION_SLOT_RATE_LIMIT: u64 = 5;  // ~2 seconds at 400ms/slot
+```
+
+Enforced in the liquidation worker:
+```rust
+if current_slot < liquidation_meta.slot + LIQUIDATION_SLOT_RATE_LIMIT {
+    // Skip: too soon since last attempt
+    continue;
+}
+```
+
+<Tip>
+**Rationale**: Prevents wasting SOL on failed attempts before user positions or prices change meaningfully.
+</Tip>
+
+### OrderSlotLimiter
+
+Prevents filling the same order multiple times in recent slots (util.rs:28-92):
+
+```rust
+pub struct OrderSlotLimiter<const N: usize> {
+    slots: [Vec<u32>; N],  // Circular buffer of order IDs per slot
+    generations: [u64; N],  // Slot number for each buffer index
+}
+```
+
+**How It Works**:
+
+1. Maintains a circular buffer of 40 slots (filler.rs:53)
+2. Tracks which order IDs were attempted in each slot
+3. Rejects orders attempted in slots `g-2` through `g-4`
+
+**Usage** (filler.rs:283):
+```rust
+crosses_and_top_makers.crosses.retain(|(o, _)| 
+    limiter.allow_event(slot, o.order_id)
+);
+```
+
+<Tip>
+**Purpose**: Avoids repeatedly attempting fills for orders that:
+- Are in auction but not yet crossable
+- Failed due to temporary conditions
+- Are being targeted by other keepers
+</Tip>
+
+### Limit Uncross Rate Limiting
+
+"Ghetto rate limit" for limit order uncrossing (filler.rs:304):
+
+```rust
+// Check limit crosses every other slot
+if slot % 2 == 0 {
+    if let Some(crosses) = dlob.find_crossing_region(...) {
+        try_uncross(...)
+    }
+}
+```
+
+Reduces transaction volume for less time-sensitive fills.
+
+## Transaction Confirmation Optimization
+
+### Pending Transaction Tracking
+
+Circular buffer for tracking pending transactions (util.rs:237-278):
+
+```rust
+pub struct PendingTxs<const N: usize> {
+    buffer: [PendingTxMeta; N],
+    head: usize,
+    tail: usize,
+    size: usize,
+}
+```
+
+**Buffer Size**: 1024 transactions (filler.rs:954)
+
+**Tracked Metadata** (util.rs:207-227):
+- Signature
+- Intent (fill type)
+- CU limit
+- Timestamp
+
+### Confirmation Latency
+
+The bot measures slots from send to confirmation (filler.rs:1110-1119):
+
+```rust
+let confirmation_slots = tx_confirmed_slot - sent_slot;
+metrics.confirmation_slots
+    .with_label_values(&[intent_label])
+    .observe(confirmation_slots as f64);
+```
+
+<Tip>
+**Optimization**: Target 1-2 slot confirmations. Higher latency suggests:
+- Priority fee too low
+- RPC connection issues
+- Network congestion
+</Tip>
+
+### Skip Preflight
+
+The bot skips preflight checks for speed (filler.rs:1014-1018):
+
+```rust
+RpcSendTransactionConfig {
+    skip_preflight: true,  // Faster sending
+    max_retries: Some(0),  // No automatic retries
+    ..Default::default()
+}
+```
+
+**Trade-off**: Faster submission but no early error detection.
+
+## Market Selection Strategies
+
+### Market Filtering
+
+Exclude certain markets to focus resources (filler.rs:72-83):
+
+```rust
+market_ids.retain(|x| {
+    let market = drift.program_data()
+        .perp_market_config_by_index(x.index())
+        .unwrap();
+    let name = core::str::from_utf8(&market.name)
+        .unwrap()
+        .to_ascii_lowercase();
+
+    // Exclude bet markets and initialized-only markets
+    !name.contains("bet") && market.status != MarketStatus::Initialized
+});
+```
+
+### Selective Market Monitoring
+
+Use `--markets` flag to target specific markets:
+
+```bash
+cargo run --release -- --mainnet --filler \
+  --markets 0,1,2  # Only SOL-PERP, BTC-PERP, ETH-PERP
+```
+
+<Tip>
+**High-Volume Markets**: SOL, BTC, ETH typically have:
+- More fill opportunities
+- Higher competition
+- Better liquidity
+- More valuable fills
+</Tip>
+
+<Tip>
+**Low-Volume Markets**: Smaller altcoin markets may have:
+- Less competition
+- Fewer fills
+- Larger percentage rewards per fill
+- More stale oracle risk
+</Tip>
+
+### All Markets vs. Subset
+
+**All Markets** (filler.rs:68-71):
+```rust
+let mut market_ids = match config.use_markets() {
+    UseMarkets::All => drift.get_all_perp_market_ids(),
+    UseMarkets::Subset(m) => m,
+};
+```
+
+**Trade-offs**:
+
+| Strategy | Pros | Cons |
+|----------|------|------|
+| **All Markets** | Maximum opportunity coverage | Higher resource usage, more gRPC bandwidth |
+| **Subset** | Focused resources, lower latency | May miss opportunities in excluded markets |
+
+## Processing Efficiency
+
+### Event Batching
+
+The bot processes gRPC events in batches for efficiency (liquidator.rs:644):
+
+```rust
+events_rx.recv_many(&mut event_buffer, 64).await;
+for event in event_buffer.drain(..) {
+    // Process event
+}
+```
+
+**Benefits**:
+- Reduces context switching
+- Better cache locality
+- Amortizes channel overhead
+
+### High-Risk User Tracking
+
+Only recalculate margin for high-risk users on oracle updates (liquidator.rs:767-832):
+
+```rust
+if oracle_update {
+    for pubkey in &high_risk {  // Only check high-risk subset
+        let margin_info = self.market_state
+            .calculate_simplified_margin_requirement(...)?;
+        
+        let status = check_margin_status(&margin_info);
+        if status.is_liquidatable() {
+            liquidatable_users.push((pubkey, user, status));
+        }
+    }
+}
+```
+
+**Efficiency Gains**:
+- Typical load: 50-200 high-risk users vs 10,000+ total users
+- 50-100x reduction in computation per oracle update
+
+### Periodic Full Recheck
+
+Rechecks all users periodically to catch newly high-risk accounts (liquidator.rs:937-1061):
+
+```rust
+const RECHECK_CYCLE_INTERVAL: u32 = 1024;
+
+cycle_count += 1;
+if cycle_count % RECHECK_CYCLE_INTERVAL == 0 {
+    // Recheck all users
+}
+```
+
+**Frequency**: Every 1024 cycles (~7-10 minutes depending on event rate)
+
+## Performance Metrics
+
+### Key Metrics to Monitor
+
+**Fill Success Rate**:
+```
+fill_actual / fill_expected
+```
+
+**Confirmation Latency**:
+```
+confirmation_slots{intent="auction_fill"}
+```
+
+**CU Efficiency**:
+```
+cu_spent{intent="auction_fill"} / cu_limit
+```
+
+**Transaction Success Rate**:
+```
+tx_confirmed / (tx_confirmed + tx_failed)
+```
+
+### Optimization Loop
+
+1. **Baseline**: Run bot with default settings for 1-2 hours
+2. **Measure**: Export metrics and analyze
+3. **Identify**: Find bottleneck (fees, CUs, latency, competition)
+4. **Adjust**: Change one parameter
+5. **Compare**: Run for another 1-2 hours
+6. **Repeat**: Iterate until optimal
+
+## Advanced Tuning
+
+### Market-Specific Priority Fees
+
+The `PriorityFeeSubscriber` monitors per-market fees (filler.rs:96-98). You could extend this to use different percentiles per market:
+
+```rust
+let priority_fee = if market_index == 0 {  // SOL-PERP
+    priority_fee_subscriber.priority_fee_nth(0.7)  // Higher competition
+} else {
+    priority_fee_subscriber.priority_fee_nth(0.5)  // Standard
+};
+```
+
+### Pyth Price Feed Optimization
+
+Different markets use different Pyth update rates (util.rs:291-297):
+
+```rust
+fn fixed_rate(feed_id: u32) -> FixedRate {
+    match feed_id {
+        1 | 2 | 6 => FixedRate::MIN,        // Fastest
+        10 => FixedRate::from_ms(50),       // 50ms
+        _ => FixedRate::from_ms(200),       // 200ms
+    }
+}
+```
+
+<Tip>
+**Optimization**: High-frequency trading benefits from faster Pyth feeds (50-100ms), but increases bandwidth and processing load.
+</Tip>
+
+### Minimize Collateral Requirements
+
+Liquidator bot filters dust accounts (liquidator.rs:577-582):
+
+```rust
+if margin_info.total_collateral < config.min_collateral as i128
+    && margin_info.margin_requirement < config.min_collateral as u128 {
+    // Skip account
+}
+```
+
+Set `min_collateral` to focus on profitable liquidations:
+
+```bash
+cargo run --release -- --mainnet --liquidator \
+  --min-collateral 1000000  # $1 minimum
+```
+
+## Benchmarking
+
+### Fill Processing Time
+
+The bot logs processing time per slot (filler.rs:319-320):
+
+```rust
+let duration = std::time::SystemTime::now().duration_since(t0).unwrap().as_millis();
+log::trace!("⏱️ checked fills at {slot}: {:?}ms", duration);
+```
+
+Enable with `RUST_LOG=filler=trace`.
+
+**Target**: &lt;50ms per slot for optimal responsiveness
+
+### Margin Calculation Performance
+
+The bot logs margin recalculation time (liquidator.rs:879-884):
+
+```rust
+let t0 = current_time_millis();
+// ... margin calculations ...
+log::debug!("processed {} high-risk margin updates in {}ms",
+    high_risk_count, current_time_millis() - t0);
+```
+
+**Target**: &lt;100ms for 100 high-risk users
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Priority Fees" icon="coins">
+    Use 50th-70th percentile based on operation urgency
+  </Card>
+  <Card title="Compute Units" icon="microchip">
+    Start at 300k-400k, auto-adjust based on accounts
+  </Card>
+  <Card title="Rate Limiting" icon="timer">
+    5-slot minimum between liquidations per user
+  </Card>
+  <Card title="Market Selection" icon="filter">
+    Focus on high-volume markets or underserved niches
+  </Card>
+</CardGroup>

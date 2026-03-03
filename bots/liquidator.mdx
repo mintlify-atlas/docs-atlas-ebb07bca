@@ -1,0 +1,286 @@
+---
+title: 'Liquidator Bot'
+description: 'Liquidate undercollateralized positions using perp fills and spot swaps'
+---
+
+## Overview
+
+The Liquidator Bot monitors Drift user accounts for undercollateralized positions and executes liquidations to maintain protocol solvency. It identifies users whose collateral has fallen below maintenance margin requirements and closes their positions using two primary strategies:
+
+1. **Perp Liquidation with Fill**: Closes perpetual positions by matching against resting limit orders in the orderbook
+2. **Spot Liquidation with Swap**: Repays spot borrows using atomic swaps via Jupiter
+
+The bot continuously tracks user margin status, prioritizes high-risk accounts, and executes liquidations with dynamic priority fees to ensure timely execution.
+
+## How It Works
+
+### Margin Status Detection
+
+The liquidator tracks three margin states:
+
+- **Safe**: `total_collateral >= margin_requirement` (sufficient collateral)
+- **High Risk**: `free_margin < 10% of margin_requirement` (approaching liquidation)
+- **Liquidatable**: `total_collateral < margin_requirement` (requires liquidation)
+
+Users in the "High Risk" state are monitored more frequently. When oracle prices update significantly, high-risk users are immediately rechecked to detect liquidations quickly.
+
+### Data Freshness Validation
+
+To ensure accurate liquidation decisions, the bot validates:
+
+- **User Account Freshness**: Must be updated within 100 slots (~40 seconds)
+- **Oracle Price Freshness**: Must be updated within 50 slots (~20 seconds)
+- **Pyth Price Freshness**: Must be updated within 5 seconds
+
+Stale data is rejected to prevent incorrect liquidations based on outdated information.
+
+### Liquidation Strategies
+
+#### Perp Liquidation with Fill
+
+1. Identify the largest perpetual position
+2. Query the DLOB for makers on the opposite side (bids for shorts, asks for longs)
+3. Build a `liquidate_perp_with_fill` transaction
+4. Execute the liquidation, paying the liquidatee and earning liquidator rewards
+
+#### Spot Liquidation with Swap
+
+1. Find borrow positions (skipping dust amounts)
+2. Identify the largest deposit to use as collateral
+3. Query Jupiter API for optimal swap route
+4. Build a `liquidate_spot_with_swap` transaction
+5. Atomically repay the borrow using the swapped collateral
+
+### Rate Limiting
+
+The bot implements a 5-slot (~2 second) rate limit between successive liquidation attempts on the same user. This prevents transaction spam when positions require multiple liquidations.
+
+## Running the Liquidator Bot
+
+### Basic Usage
+
+<CodeGroup>
+
+```bash Mainnet
+RUST_LOG=liquidator=info,dlob=info \
+    cargo run --release -- --mainnet --liquidator
+```
+
+```bash Devnet
+RUST_LOG=liquidator=info,dlob=info \
+    cargo run --release -- --liquidator
+```
+
+```bash Dry Run (Simulation)
+RUST_LOG=liquidator=info,dlob=info \
+    cargo run --release -- --mainnet --liquidator --dry
+```
+
+</CodeGroup>
+
+### Advanced Configuration
+
+```bash
+# Liquidator with minimum collateral threshold
+cargo run --release -- --mainnet --liquidator --min-collateral 5000000
+
+# Liquidator without spot liquidation (perp only)
+cargo run --release -- --mainnet --liquidator --use-spot-liquidation false
+```
+
+## Configuration
+
+### CLI Flags
+
+<ParamField path="--liquidator" type="boolean" default="false">
+  Enable the liquidator bot mode. When set, the bot monitors user accounts for liquidatable positions instead of filling orders.
+</ParamField>
+
+<ParamField path="--min-collateral" type="u64" default="1000000">
+  Minimum collateral threshold (in USDC microunits, 6 decimals) for considering accounts for liquidation. Accounts with total collateral below this value are skipped to avoid liquidating dust positions.
+  
+  Default: 1,000,000 = 1 USDC
+  
+  Example: `--min-collateral 5000000` sets a 5 USDC minimum threshold
+</ParamField>
+
+<ParamField path="--use-spot-liquidation" type="boolean" default="true">
+  Enable spot liquidation strategy using Jupiter swaps. When disabled, the bot only liquidates perpetual positions.
+  
+  Set to `false` to disable: `--use-spot-liquidation false`
+</ParamField>
+
+<ParamField path="--mainnet" type="boolean" default="true">
+  Connect to Solana mainnet-beta. When set to false, connects to devnet. Can also be set via the `MAINNET` environment variable.
+</ParamField>
+
+<ParamField path="--priority-fee" type="u64" default="512">
+  Base priority fee in microlamports per compute unit. Liquidations use dynamic priority fees (60th percentile) to ensure timely execution during network congestion.
+</ParamField>
+
+<ParamField path="--dry" type="boolean" default="false">
+  Enable dry-run mode. Liquidations are simulated but not actually executed on the network. Useful for testing strategy without risking funds. Can also be set via the `DRY_RUN` environment variable.
+</ParamField>
+
+<ParamField path="--sub-account-id" type="u16" default="0">
+  Sub-account ID to use for the bot's Drift account. Allows running multiple bots with different sub-accounts from the same wallet.
+</ParamField>
+
+## Environment Variables
+
+### Required
+
+<ParamField path="BOT_PRIVATE_KEY" type="string" required>
+  Base58-encoded private key for the bot's Solana wallet. This wallet should have sufficient SOL for transaction fees and USDC for liquidation collateral.
+</ParamField>
+
+<ParamField path="RPC_URL" type="string" required>
+  Solana RPC endpoint URL. Use a high-performance RPC provider for best results.
+  
+  Example: `https://api.mainnet-beta.solana.com`
+</ParamField>
+
+<ParamField path="GRPC_ENDPOINT" type="string" required>
+  Drift gRPC endpoint for real-time account and slot updates.
+  
+  Example: `https://api.rpcpool.com`
+</ParamField>
+
+<ParamField path="GRPC_X_TOKEN" type="string" required>
+  Authentication token for the gRPC endpoint.
+</ParamField>
+
+<ParamField path="PYTH_LAZER_TOKEN" type="string" required>
+  Pyth Lazer access token for real-time price feeds. Critical for accurate margin calculations.
+</ParamField>
+
+### Optional
+
+<ParamField path="METRICS_PORT" type="number" default="9898">
+  Port for the Prometheus metrics and dashboard HTTP server. The liquidator exposes additional dashboard data showing high-risk users and their margin status.
+</ParamField>
+
+## Monitoring
+
+The Liquidator Bot exposes several HTTP endpoints for monitoring:
+
+- `http://localhost:9898/metrics` - Prometheus metrics
+- `http://localhost:9898/health` - Health check endpoint
+- `http://localhost:9898/dashboard` - Human-readable dashboard showing high-risk users
+- `http://localhost:9898/api/dashboard` - JSON API for dashboard data
+
+### Dashboard Data
+
+The liquidator dashboard displays:
+
+- **High-Risk Users**: Users with free margin < 10% of margin requirement
+- **Margin Status**: Current collateral, margin requirement, and free margin ratio
+- **Position Details**: Perp and spot positions for each high-risk user
+- **Oracle Prices**: Current prices for all markets
+- **Staleness Indicators**: Flags for stale user accounts or oracle prices
+
+### Key Metrics
+
+- **Liquidations**: Total number of successful liquidation transactions
+- **Liquidation Revenue**: Profit from liquidator rewards
+- **High-Risk Users**: Count of users approaching liquidation
+- **Stale Data Rejections**: Count of liquidations skipped due to stale data
+
+## Performance Tuning
+
+<Tip>
+  **Minimum Collateral**: Set `--min-collateral` higher (e.g., 10 USDC) to focus on larger positions and reduce gas costs on unprofitable liquidations.
+</Tip>
+
+<Tip>
+  **Priority Fees**: Liquidations are time-sensitive. The bot automatically uses 60th percentile priority fees, but you can adjust the base fee if needed.
+</Tip>
+
+<Warning>
+  **Capital Requirements**: The liquidator may need to temporarily hold positions when liquidating. Ensure your bot wallet has sufficient collateral across multiple markets.
+</Warning>
+
+## Risk Management
+
+### Data Staleness
+
+The bot automatically rejects liquidations when:
+- User account data is &gt;100 slots old
+- Oracle prices are &gt;50 slots old
+- Pyth prices are &gt;5 seconds old
+
+This prevents incorrect liquidations based on outdated information.
+
+### Rate Limiting
+
+A 5-slot rate limit prevents excessive transaction spam on the same user. If a position requires multiple liquidations, the bot waits between attempts.
+
+### Compute Budget
+
+Liquidation transactions can be complex, especially spot swaps with Jupiter. The bot includes appropriate compute budget instructions to prevent failures.
+
+## Common Issues
+
+### No Liquidations Found
+
+This is normal during stable market conditions. The bot continuously monitors all users but only acts when positions become undercollateralized.
+
+### Stale Data Warnings
+
+If you see frequent "stale data" warnings:
+1. Verify your gRPC connection is stable
+2. Check that oracle accounts are updating (network issues can cause delays)
+3. Ensure your system clock is synchronized
+
+### Transaction Failures
+
+If liquidation transactions fail:
+1. Check that your wallet has sufficient collateral
+2. Verify you have enough SOL for transaction fees
+3. Review transaction logs for specific error messages
+4. Consider increasing priority fees during network congestion
+
+### Insufficient Funds
+
+Liquidations may require the bot to temporarily take on positions. Ensure your Drift account has:
+- Sufficient USDC collateral
+- Available deposits in relevant spot markets
+- Margin headroom to handle position transfers
+
+## Liquidation Strategies in Detail
+
+### Perp-with-Fill Strategy
+
+**Source**: `src/liquidator.rs` (referenced in README.md)
+
+This strategy is used for perpetual futures positions:
+
+1. **Position Analysis**: Identifies the largest perp position by notional value
+2. **Maker Discovery**: Queries DLOB for makers on the opposite side
+3. **Transaction Building**: Creates `liquidate_perp_with_fill` instruction
+4. **Reward Calculation**: Liquidator earns a percentage of the position's value
+
+**Best for**: Large perpetual positions with available orderbook liquidity
+
+### Spot-with-Swap Strategy
+
+**Source**: `src/liquidator.rs` (referenced in README.md)
+
+This strategy is used for spot borrow positions:
+
+1. **Borrow Identification**: Finds spot positions with negative balance (borrows)
+2. **Collateral Selection**: Chooses largest deposit to use for repayment
+3. **Route Discovery**: Queries Jupiter for optimal swap path
+4. **Atomic Execution**: Swaps collateral and repays borrow in single transaction
+
+**Best for**: Spot borrow positions without available orderbook liquidity
+
+## Source Code Reference
+
+The Liquidator Bot implementation can be found in `src/liquidator.rs`. Key components:
+
+- **LiquidatorBot struct**: Main bot structure with user tracking
+- **Margin Status Checking** (`src/liquidator.rs:99-144`): Data freshness validation
+- **Dashboard Updates** (`src/liquidator.rs:164-200`): High-risk user tracking
+- **Liquidation Strategies**: Perp-with-fill and spot-with-swap implementations
+- **Rate Limiting** (`src/liquidator.rs:46`): 5-slot minimum between attempts

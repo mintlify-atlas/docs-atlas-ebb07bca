@@ -1,0 +1,372 @@
+---
+title: 'Troubleshooting'
+description: 'Common issues and solutions for Keep-rs bot operators'
+icon: 'wrench'
+---
+
+## Common Issues
+
+This guide covers common problems encountered when running Keep-rs bots and their solutions.
+
+<Accordion title="RPC Connection Issues">
+
+### Symptoms
+- Bot fails to start with connection errors
+- Intermittent disconnections during operation
+- Slow transaction confirmations
+
+### Solutions
+
+**Check Environment Variables**
+```bash
+# Verify all required variables are set
+echo $RPC_URL
+echo $GRPC_ENDPOINT
+echo $GRPC_X_TOKEN
+```
+
+Required environment variables:
+- `RPC_URL` - Solana RPC endpoint (must support websockets)
+- `GRPC_ENDPOINT` - Drift gRPC endpoint (e.g., `https://api.rpcpool.com`)
+- `GRPC_X_TOKEN` - Authentication token for gRPC
+- `PYTH_LAZER_TOKEN` - Pyth price feed access token
+
+**Upgrade RPC Tier**
+
+High-frequency bots require premium RPC access with:
+- High rate limits (1000+ requests/second)
+- Low latency (&lt;50ms)
+- gRPC support for real-time account updates
+
+**Connection Timeout Handling**
+
+The bot automatically retries failed connections with exponential backoff:
+- Max retries: 10 attempts
+- Backoff: `2^retries` seconds (capped at 30s)
+- Applies to: Pyth price feed connections (util.rs:356)
+
+</Accordion>
+
+<Accordion title="Transaction Failures: Insufficient Funds">
+
+### Error Message
+```
+bot needs more SOL!
+tx failed: InsufficientFundsForFee
+```
+
+Source: filler.rs:1158-1165
+
+### Cause
+Your bot wallet doesn't have enough SOL to cover transaction fees.
+
+### Solutions
+
+**Check Wallet Balance**
+```bash
+solana balance <YOUR_BOT_PUBKEY>
+```
+
+**Minimum Balance Requirements**
+- **Filler Bot**: 1-5 SOL (depending on transaction volume)
+- **Liquidator Bot**: 2-10 SOL (liquidations use more compute units)
+- Higher priority fees require more SOL
+
+**Top Up Wallet**
+```bash
+solana transfer <YOUR_BOT_PUBKEY> 5 --allow-unfunded-recipient
+```
+
+**Monitor Balance**
+
+The bot tracks `InsufficientFundsForFee` errors in metrics:
+```
+tx_failed{intent="auction_fill", reason="insufficient_funds"}
+```
+
+</Accordion>
+
+<Accordion title="Transaction Failures: Compute Unit Exceeded">
+
+### Error Message
+```
+exceeded CUs meter
+tx_failed: insufficient_cus
+```
+
+Source: filler.rs:1099-1106
+
+### Cause
+Transaction consumed more compute units (CUs) than allocated.
+
+### Default Limits
+- Swift fills: Configured via `--swift-cu-limit` (default varies by config)
+- Auction fills: Configured via `--fill-cu-limit` (default varies by config)
+- Dynamic adjustment based on account list size (filler.rs:462-469, 633-641)
+
+### Solutions
+
+**Increase CU Limits**
+```bash
+# For filler bot
+RUST_LOG=filler=info cargo run --release -- --mainnet --filler \
+  --fill-cu-limit 500000 \
+  --swift-cu-limit 400000
+```
+
+**How CU Limits Are Adjusted**
+
+The bot automatically increases CU limits based on transaction complexity:
+
+**Swift Fills** (filler.rs:462-469)
+```rust
+// If 30+ accounts, double the CU limit
+if ix.accounts.len() >= 30 {
+    cu_limit = cu_limit * 2
+}
+```
+
+**Auction Fills** (filler.rs:633-641)
+```rust
+// If 20+ accounts, double the CU limit
+if ix.accounts.len() >= 20 {
+    cu_limit = cu_limit * 2
+}
+```
+
+**Limit Uncross** (filler.rs:759-765)
+```rust
+// If 40+ accounts, increase by 2.5x
+if ix.accounts.len() >= 40 {
+    cu_limit = (cu_limit * 25) / 10
+}
+```
+
+**Monitor CU Usage**
+
+Metrics track actual CU consumption:
+```
+cu_spent{intent="auction_fill"} <observed_value>
+```
+
+</Accordion>
+
+<Accordion title="gRPC Authentication Errors">
+
+### Error Message
+```
+grpc connection failed: authentication error
+failed to subscribe: UNAUTHENTICATED
+```
+
+### Cause
+Invalid or expired `GRPC_X_TOKEN`.
+
+### Solutions
+
+**Verify Token**
+```bash
+echo $GRPC_X_TOKEN
+```
+
+**Get New Token**
+
+Contact your gRPC provider (e.g., RPC Pool, Triton) to:
+- Verify your subscription is active
+- Regenerate authentication token
+- Check API quota limits
+
+**Test Connection**
+```bash
+grpcurl -H "x-token: $GRPC_X_TOKEN" \
+  $GRPC_ENDPOINT drift.gRPC/SubscribeAccounts
+```
+
+</Accordion>
+
+<Accordion title="Stale Data Issues">
+
+### Warning Messages
+```
+Recalculating margin for stale user: user account 150 slots old
+Recalculating margin with stale oracle: market 0 is 75 slots old
+Skipping stale Pyth price for market 5 in liquidation
+```
+
+Source: liquidator.rs:59-162
+
+### Staleness Thresholds
+
+**User Accounts** (liquidator.rs:60)
+- Max age: **100 slots** (~40 seconds)
+- Checked before liquidation attempts
+
+**Oracle Prices** (liquidator.rs:62)
+- Max age: **50 slots** (~20 seconds)
+- Validated for all user positions
+
+**Pyth Prices** (liquidator.rs:64)
+- Max age: **5000ms** (5 seconds)
+- Checked before using in transactions
+
+### Causes
+1. **gRPC Connection Issues** - Missed account updates
+2. **Network Congestion** - Delayed slot progression
+3. **Oracle Downtime** - Price feed not updating
+4. **Bot Performance** - Can't process updates fast enough
+
+### Solutions
+
+**Improve gRPC Connection**
+- Use dedicated gRPC endpoint
+- Enable account filters to reduce bandwidth
+- Ensure stable network connection
+
+**Monitor Oracle Updates**
+
+The bot logs oracle prices with delays:
+```rust
+log::debug!("oracle price: delay:{:?}, market:{:?}, oracle:{:?}, amm:{:?}",
+    chain_oracle_data.delay, market, chain_oracle_data.price, amm_price);
+```
+
+Source: filler.rs:271
+
+**Data Freshness Validation**
+
+Before liquidating, the bot validates data freshness (liquidator.rs:98-144):
+```rust
+fn validate_data_freshness(
+    user_meta: &UserAccountMetadata,
+    oracle_prices: &HashMap<MarketId, OraclePriceMetadata>,
+    current_slot: u64,
+) -> Result<(), StalenessError>
+```
+
+The bot will:
+- Log staleness warnings
+- Attempt recalculation with stale data
+- Skip liquidation if critical data is too stale
+
+</Accordion>
+
+<Accordion title="Competition Scenarios">
+
+### Scenario 1: AMM Fill Beats You
+
+The vAMM (virtual AMM) filled the order before your transaction landed.
+
+**Why This Happens**
+- vAMM has no network latency
+- vAMM JIT (Just-In-Time) making is enabled
+- Your priority fee was too low
+
+**Detection** (filler.rs:782-792)
+```rust
+fn amm_wants_to_jit_make(amm: &AMM, taker_direction: PositionDirection) -> bool {
+    let amm_wants_to_jit_make = match taker_direction {
+        PositionDirection::Long => {
+            amm.base_asset_amount_with_amm < -(amm.order_step_size)
+        }
+        PositionDirection::Short => {
+            amm.base_asset_amount_with_amm > amm.order_step_size
+        }
+    };
+    amm_wants_to_jit_make && amm.amm_jit_intensity > 0
+}
+```
+
+**Solution**: Increase priority fees during high vAMM activity.
+
+---
+
+### Scenario 2: Higher Priority Fee
+
+Another keeper bot paid a higher priority fee and got included first.
+
+**Metrics**
+```
+tx_confirmed{intent="auction_fill", status="no_fills"}
+```
+
+Source: filler.rs:1127-1131
+
+**Solution**: Adjust priority fee strategy.
+
+---
+
+### Scenario 3: Order Already Filled
+
+The order was filled by another keeper between cross detection and transaction confirmation.
+
+**Metrics**
+```
+tx_confirmed{intent="auction_fill", status="no_fills"}
+fill_expected - fill_actual > 0
+```
+
+Source: filler.rs:1000-1004, 1112-1125
+
+**Solution**: 
+- Reduce transaction latency
+- Optimize cross detection speed
+- Accept this as normal competition
+
+---
+
+### Scenario 4: Partial Fill
+
+**Metrics**
+```
+tx_confirmed{intent="auction_fill", status="partial"}
+actual_fills < expected_fill_count
+```
+
+Source: filler.rs:1132-1136
+
+**Causes**:
+- Insufficient maker liquidity
+- Maker order partially filled by another taker
+- Maker position limits reached
+
+**Solution**: Include more maker accounts in transaction.
+
+</Accordion>
+
+## Error Tracking
+
+### Transaction Failure Metrics
+
+The bot tracks all transaction failures with labels (filler.rs:1034-1040, 1154-1186):
+
+```
+tx_failed{intent="auction_fill", reason="send_error"}
+tx_failed{intent="auction_fill", reason="insufficient_funds"}
+tx_failed{intent="auction_fill", reason="insufficient_cus"}
+tx_failed{intent="auction_fill", reason="confirmation_failed"}
+tx_failed{intent="auction_fill", reason="metadata_missing"}
+```
+
+### Success Metrics
+
+```
+tx_confirmed{intent="auction_fill", status="ok"}
+tx_confirmed{intent="auction_fill", status="partial"}
+tx_confirmed{intent="auction_fill", status="no_fills"}
+```
+
+### Viewing Metrics
+
+If running with HTTP metrics enabled:
+```bash
+curl http://localhost:8080/metrics
+```
+
+## Getting Help
+
+If you encounter issues not covered here:
+
+1. **Check Logs**: Run with `RUST_LOG=debug` for verbose output
+2. **Review Metrics**: Identify patterns in failures
+3. **Drift Discord**: Ask in the `#keepers` channel
+4. **GitHub Issues**: Report bugs at [drift-labs/keeper-bots-v2](https://github.com/drift-labs/keeper-bots-v2/issues)
