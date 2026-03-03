@@ -158,6 +158,17 @@ Environment variables are loaded from a `.env` file in the project root. Copy `.
   ```
 </ParamField>
 
+<ParamField path="FILL_CU_LIMIT" type="number" default="256000">
+  **Compute unit limit** for liquidation transactions (liquidator bot only).
+  
+  This environment variable can override the `--fill-cu-limit` CLI flag for the liquidator bot. The liquidator uses this to set compute unit limits for liquidation transactions.
+  
+  Example:
+  ```bash
+  FILL_CU_LIMIT=300000
+  ```
+</ParamField>
+
 ## CLI Flags
 
 Command-line flags configure bot behavior and override environment variables.
